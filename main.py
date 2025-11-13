@@ -88,84 +88,356 @@ save_seduce_records = lambda: save_json(SEDUCE_RECORDS_FILE, seduce_records)
 save_reset_blind_box_records = lambda: save_json(RESET_BLIND_BOX_RECORDS_FILE, reset_blind_box_records)
 
 
-def load_group_config(group_id: str) -> dict:
-    path = os.path.join(CONFIG_DIR, f"{group_id}.json")
+GLOBAL_WIFE_FILE = os.path.join(CONFIG_DIR, "wives_global.json")
+RESERVED_CONFIG_FILES = {
+    os.path.basename(NTR_STATUS_FILE),
+    os.path.basename(NTR_RECORDS_FILE),
+    os.path.basename(CHANGE_RECORDS_FILE),
+    os.path.basename(RESET_SHARED_FILE),
+    os.path.basename(SWAP_REQUESTS_FILE),
+    os.path.basename(SWAP_LIMIT_FILE),
+    os.path.basename(PRO_USER_FILE),
+    os.path.basename(ITEMS_FILE),
+    os.path.basename(EFFECTS_FILE),
+    os.path.basename(SELECT_WIFE_RECORDS_FILE),
+    os.path.basename(BEAT_WIFE_RECORDS_FILE),
+    os.path.basename(SEDUCE_RECORDS_FILE),
+    os.path.basename(RESET_BLIND_BOX_RECORDS_FILE),
+    os.path.basename(GLOBAL_WIFE_FILE),
+}
+
+
+def clamp_probability(value) -> float:
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+        val = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(0.9, val))
 
 
-def write_group_config(
-    group_id: str, user_id: str, wife_name: str, date: str, nickname: str, config: dict
-):
-    # 统一使用 {"wives": [...], "date": ..., "nick": ...} 格式
-    config[user_id] = {"wives": [wife_name], "date": date, "nick": nickname}
-    path = os.path.join(CONFIG_DIR, f"{group_id}.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(config, f, ensure_ascii=False, indent=4)
+def _normalize_user_record(uid: str, record) -> dict:
+    result = {
+        "nick": f"用户{uid}",
+        "wives": [],
+        "date": get_today(),
+        "harem": False,
+        "groups": [],
+    }
+    if isinstance(record, dict):
+        if isinstance(record.get("nick"), str) and record["nick"].strip():
+            result["nick"] = record["nick"]
+        if isinstance(record.get("date"), str):
+            result["date"] = record["date"]
+        if "harem" in record:
+            result["harem"] = bool(record["harem"])
+        if isinstance(record.get("wives"), list):
+            result["wives"] = list(dict.fromkeys([w for w in record["wives"] if isinstance(w, str)]))
+        groups = record.get("groups")
+        if isinstance(groups, list):
+            result["groups"] = [str(g) for g in groups if g]
+        elif isinstance(groups, dict):
+            merged_wives = list(result["wives"])
+            latest_date = result["date"]
+            harem_flag = result["harem"]
+            nick_value = result["nick"]
+            group_ids = []
+            for gid, rec in groups.items():
+                group_ids.append(str(gid))
+                if isinstance(rec, dict):
+                    if isinstance(rec.get("wives"), list):
+                        for w in rec["wives"]:
+                            if isinstance(w, str) and w not in merged_wives:
+                                merged_wives.append(w)
+                    if isinstance(rec.get("date"), str):
+                        latest_date = rec["date"]
+                    if rec.get("harem"):
+                        harem_flag = True
+                    if isinstance(rec.get("nick"), str) and rec["nick"].strip():
+                        nick_value = rec["nick"]
+            if group_ids:
+                result["groups"] = list(dict.fromkeys(group_ids))
+            if merged_wives:
+                result["wives"] = merged_wives
+            result["date"] = latest_date
+            result["harem"] = harem_flag
+            result["nick"] = nick_value
+    result["groups"] = list(dict.fromkeys([str(g) for g in result["groups"] if g]))
+    result["nick"] = result["nick"] or f"用户{uid}"
+    return result
 
 
-def is_harem_user(cfg: dict, uid: str) -> bool:
-    """检查用户是否开启了后宫模式"""
-    data = cfg.get(uid)
-    if not data or not isinstance(data, dict):
-        return False
-    return data.get("harem") is True
+def load_wife_data():
+    raw = load_json(GLOBAL_WIFE_FILE)
+    data = {}
+    if isinstance(raw, dict):
+        for uid, record in raw.items():
+            data[str(uid)] = _normalize_user_record(str(uid), record)
+    if not data:
+        aggregated = {}
+        for filename in os.listdir(CONFIG_DIR):
+            if not filename.endswith(".json") or filename in RESERVED_CONFIG_FILES:
+                continue
+            group_id = os.path.splitext(filename)[0]
+            old_cfg = load_json(os.path.join(CONFIG_DIR, filename))
+            if not isinstance(old_cfg, dict):
+                continue
+            for uid, rec in old_cfg.items():
+                uid_str = str(uid)
+                info = aggregated.setdefault(
+                    uid_str,
+                    {
+                        "nick": "",
+                        "wives": [],
+                        "date": get_today(),
+                        "harem": False,
+                        "groups": set(),
+                    },
+                )
+                info["groups"].add(str(group_id))
+                if isinstance(rec, list) and rec:
+                    rec = {
+                        "wives": [rec[0]],
+                        "date": rec[1] if len(rec) > 1 else info["date"],
+                        "nick": rec[2] if len(rec) > 2 else info["nick"],
+                    }
+                if not isinstance(rec, dict):
+                    continue
+                if isinstance(rec.get("nick"), str) and rec["nick"].strip():
+                    info["nick"] = rec["nick"]
+                if isinstance(rec.get("date"), str):
+                    info["date"] = rec["date"]
+                if rec.get("harem"):
+                    info["harem"] = True
+                if isinstance(rec.get("wives"), list):
+                    for w in rec["wives"]:
+                        if isinstance(w, str) and w not in info["wives"]:
+                            info["wives"].append(w)
+        if aggregated:
+            for uid, info in aggregated.items():
+                data[uid] = {
+                    "nick": info["nick"] or f"用户{uid}",
+                    "wives": info["wives"],
+                    "date": info["date"],
+                    "harem": info["harem"],
+                    "groups": list(sorted(info["groups"])),
+                }
+            save_json(GLOBAL_WIFE_FILE, data)
+    elif raw != data:
+        save_json(GLOBAL_WIFE_FILE, data)
+    return data
 
 
-def get_wife_count(cfg: dict, uid: str, today: str) -> int:
-    """获取用户今天的老婆数量"""
-    data = cfg.get(uid)
-    if not data or not isinstance(data, dict):
-        return 0
-    if data.get("date") == today:
-        return len(data.get("wives", []))
+wives_data = load_wife_data()
+
+
+def save_wife_data():
+    # 保存全局老婆数据
+    save_json(GLOBAL_WIFE_FILE, wives_data)
+
+
+def _ensure_user_entry(uid: str, nick: str = "") -> dict:
+    uid = str(uid)
+    entry = wives_data.setdefault(
+        uid,
+        {
+            "nick": nick or f"用户{uid}",
+            "wives": [],
+            "date": get_today(),
+            "harem": False,
+            "groups": [],
+        },
+    )
+    if nick:
+        entry["nick"] = nick
+    entry.setdefault("wives", [])
+    entry.setdefault("date", get_today())
+    entry.setdefault("harem", False)
+    groups = entry.get("groups")
+    if not isinstance(groups, list):
+        groups = []
+    entry["groups"] = [str(g) for g in groups if g]
+    return entry
+
+
+def _ensure_group_membership(record: dict, gid: str):
+    if not record:
+        return
+    gid_str = str(gid)
+    if not gid_str:
+        return
+    groups = record.setdefault("groups", [])
+    if gid_str not in groups:
+        groups.append(gid_str)
+        save_wife_data()
+
+
+def get_group_record(uid: str, gid: str, attach: bool = False) -> dict | None:
+    record = _ensure_user_entry(uid)
+    gid_str = str(gid)
+    if not gid_str:
+        return record
+    if gid_str in record["groups"]:
+        return record
+    if attach:
+        _ensure_group_membership(record, gid_str)
+        return record
+    return None
+
+
+def ensure_group_record(uid: str, gid: str, date: str, nick: str, keep_existing: bool = False) -> dict:
+    record = get_group_record(uid, gid, attach=True) or _ensure_user_entry(uid, nick)
+    if not keep_existing and record.get("date") != date:
+        record["wives"] = []
+    record["date"] = date
+    if nick:
+        record["nick"] = nick
+    _ensure_group_membership(record, gid)
+    return record
+
+
+def remove_group_record(uid: str, gid: str):
+    record = wives_data.get(str(uid))
+    gid_str = str(gid)
+    if not record or not isinstance(record, dict):
+        return
+    groups = record.get("groups", [])
+    if gid_str in groups:
+        groups.remove(gid_str)
+    if not groups:
+        record["harem"] = False
+    save_wife_data()
+
+
+def iter_group_users(gid: str):
+    gid_str = str(gid)
+    for uid, record in wives_data.items():
+        if not isinstance(record, dict):
+            continue
+        groups = record.get("groups", [])
+        if gid_str in groups:
+            yield uid, record, record
+
+
+def is_harem_user(arg1, arg2=None) -> bool:
+    if isinstance(arg1, dict):
+        cfg = arg1
+        uid = arg2
+        gid = getattr(cfg, "group_id", None)
+    else:
+        uid = arg1
+        gid = arg2
+    record = get_group_record(uid, gid, attach=True)
+    return bool(record and record.get("harem"))
+
+
+def get_wife_count(arg1, arg2, today: str) -> int:
+    if isinstance(arg1, dict):
+        cfg = arg1
+        uid = arg2
+        gid = getattr(cfg, "group_id", None)
+    else:
+        uid = arg1
+        gid = arg2
+    record = get_group_record(uid, gid, attach=True)
+    if record and record.get("date") == today:
+        return len(record.get("wives", []))
     return 0
 
 
-def get_wives_list(cfg: dict, uid: str, today: str) -> list:
-    """获取用户今天的老婆列表（图片名列表）"""
-    data = cfg.get(uid)
-    if not data or not isinstance(data, dict):
-        return []
-    if data.get("date") == today:
-        return data.get("wives", [])
+def get_wives_list(arg1, arg2, today: str) -> list:
+    if isinstance(arg1, dict):
+        cfg = arg1
+        uid = arg2
+        gid = getattr(cfg, "group_id", None)
+    else:
+        uid = arg1
+        gid = arg2
+    record = get_group_record(uid, gid, attach=True)
+    if record and record.get("date") == today:
+        return list(record.get("wives", []))
     return []
 
 
-def add_wife(cfg: dict, uid: str, img: str, date: str, nick: str, is_harem: bool = False):
-    """添加一个老婆到用户列表（统一格式：{"wives": [...], "date": ..., "nick": ...}）"""
-    if uid not in cfg:
-        cfg[uid] = {"wives": [], "date": date, "nick": nick}
-        if is_harem:
-            cfg[uid]["harem"] = True
-    data = cfg[uid]
-    # 兼容旧格式：如果是列表格式，转换为新格式
-    if isinstance(data, list) and len(data) >= 1:
-        old_img = data[0]
-        cfg[uid] = {"wives": [old_img], "date": data[1] if len(data) > 1 else date, "nick": data[2] if len(data) > 2 else nick}
-        if is_harem:
-            cfg[uid]["harem"] = True
-        data = cfg[uid]
-    # 确保是字典格式
-    if not isinstance(data, dict):
-        cfg[uid] = {"wives": [img], "date": date, "nick": nick}
-        if is_harem:
-            cfg[uid]["harem"] = True
-        data = cfg[uid]
-    # 更新日期和昵称
-    if data.get("date") != date:
-        data["wives"] = []
-        data["date"] = date
-        data["nick"] = nick
-    # 更新harem标记
+def add_wife(arg1, arg2, img: str, date: str, nick: str, is_harem: bool = False):
+    if isinstance(arg1, dict):
+        cfg = arg1
+        uid = arg2
+        gid = getattr(cfg, "group_id", None)
+    else:
+        uid = arg1
+        gid = arg2
+        cfg = None
+    record = ensure_group_record(uid, gid, date, nick, keep_existing=is_harem)
     if is_harem:
-        data["harem"] = True
-    # 添加老婆
-    if img not in data["wives"]:
-        data["wives"].append(img)
+        record["harem"] = True
+        if img not in record["wives"]:
+            record["wives"].append(img)
+    else:
+        record["harem"] = False
+        record["wives"] = [img]
+    if isinstance(cfg, dict):
+        dict.__setitem__(cfg, str(uid), record)
+
+
+class GroupConfigDict(dict):
+    def __init__(self, gid: str):
+        super().__init__()
+        self.group_id = str(gid)
+
+    def __getitem__(self, uid):
+        uid_str = str(uid)
+        if uid_str not in self:
+            record = get_group_record(uid_str, self.group_id, attach=True)
+            if record:
+                dict.__setitem__(self, uid_str, record)
+        return dict.__getitem__(self, uid_str)
+
+    def get(self, uid, default=None):
+        uid_str = str(uid)
+        if uid_str not in self:
+            record = get_group_record(uid_str, self.group_id, attach=True)
+            if record:
+                dict.__setitem__(self, uid_str, record)
+                return record
+            return default
+        return dict.get(self, uid_str, default)
+
+    def __setitem__(self, uid, value):
+        uid_str = str(uid)
+        record = get_group_record(uid_str, self.group_id, attach=True)
+        if value and isinstance(value, dict):
+            if "nick" in value and isinstance(value["nick"], str):
+                record["nick"] = value["nick"]
+            if "date" in value and isinstance(value["date"], str):
+                record["date"] = value["date"]
+            if "harem" in value:
+                record["harem"] = bool(value["harem"])
+            if "wives" in value and isinstance(value["wives"], list):
+                record["wives"] = list(value["wives"])
+        dict.__setitem__(self, uid_str, record)
+
+    def __delitem__(self, uid):
+        uid_str = str(uid)
+        record = get_group_record(uid_str, self.group_id, attach=True)
+        if record:
+            record["wives"] = []
+            record["harem"] = False
+        if uid_str in self:
+            dict.__delitem__(self, uid_str)
+
+
+def load_group_config(group_id: str) -> GroupConfigDict:
+    gid = str(group_id)
+    cfg = GroupConfigDict(gid)
+    for uid, record in wives_data.items():
+        normalized = _ensure_user_entry(uid, record.get("nick", f"用户{uid}"))
+        if gid in normalized.get("groups", []):
+            dict.__setitem__(cfg, str(uid), normalized)
+    return cfg
+
+
+def save_group_config(cfg: GroupConfigDict | None = None):
+    save_wife_data()
 
 
 def load_swap_requests():
@@ -241,6 +513,7 @@ def get_user_effects(today: str, uid: str) -> dict:
                 "ntr_attack_bonus": 0.0,  # 进攻方牛成功率增幅，叠加到基础概率
                 "ntr_defense_bonus": 0.0,  # 防守方被牛成功率增幅（对方受益，自己受损）
                 "change_extra_uses": 0,  # 额外换老婆次数
+                "ntr_extra_uses": 0,  # 额外牛老婆次数
                 "select_wife_uses": 0,  # 选老婆使用次数
                 "beat_wife_uses": 0,  # 打老婆使用次数
                 "seduce_uses": 0,  # 勾引使用次数（-1表示无限）
@@ -263,8 +536,12 @@ def get_user_effects(today: str, uid: str) -> dict:
                 "victim_auto_ntr": False,  # 苦主：被牛必定成功
                 "change_free_prob": 0.0,  # 何意味：换老婆免消耗概率
                 "change_fail_prob": 0.0,  # 何意味：换老婆失败概率
-                "blind_box_extra_draw": False,  # 额外抽盲盒机会
+                "blind_box_extra_draw": 0,  # 额外抽盲盒机会次数
                 "blind_box_groups": [],  # 今日已抽盲盒的群列表
+                "double_item_effect": False,  # 二度寝：下次道具效果翻倍
+                "competition_prob": 0.3,  # 雄竞概率
+                "harem_chaos_multiplier": 1.0,  # 开后宫修罗场概率倍数
+                "lost_wives": [],  # 今日被牛走的老婆
             },
         }
         day_map[uid] = eff
@@ -296,6 +573,29 @@ def get_user_meta(today: str, uid: str, key: str, default=None):
 
 def set_user_meta(today: str, uid: str, key: str, value):
     get_user_effects(today, uid)["meta"][key] = value
+    save_effects()
+
+
+def get_group_meta(today: str, gid: str, key: str, default=0):
+    day_map = effects_data.setdefault(today, {})
+    group_map = day_map.setdefault("__groups__", {})
+    group_state = group_map.get(gid, {})
+    return group_state.get(key, default)
+
+
+def add_group_meta(today: str, gid: str, key: str, delta):
+    day_map = effects_data.setdefault(today, {})
+    group_map = day_map.setdefault("__groups__", {})
+    group_state = group_map.setdefault(gid, {})
+    group_state[key] = group_state.get(key, 0) + delta
+    save_effects()
+
+
+def set_group_meta(today: str, gid: str, key: str, value):
+    day_map = effects_data.setdefault(today, {})
+    group_map = day_map.setdefault("__groups__", {})
+    group_state = group_map.setdefault(gid, {})
+    group_state[key] = value
     save_effects()
 
 
@@ -348,6 +648,11 @@ class WifePlugin(Star):
             "病娇",
             "儒夫",
             "熊出没",
+            "宝刀未老",
+            "鹿鹿时间到了",
+            "开明盒",
+            "龙王",
+            "二度寝",
         ]
         self.items_need_target = {"雌堕", "雄竞", "勾引"}
         # 状态效果道具（不可重复获得）
@@ -362,12 +667,15 @@ class WifePlugin(Star):
             "公交车",
             "病娇",
             "熊出没",
+            "龙王",
         }
         # 命令与处理函数映射
         self.commands = {
             "抽老婆": self.animewife,
             "牛老婆": self.ntr_wife,
             "查老婆": self.search_wife,
+            "查状态": self.view_status,
+            "老婆插件帮助": self.show_wife_help,
             "切换ntr开关状态": self.switch_ntr,
             "换老婆": self.change_wife,
             "重置牛": self.reset_ntr,
@@ -413,11 +721,23 @@ class WifePlugin(Star):
             name = msg.split(maxsplit=1)[-1]
             if name:
                 group_id = str(event.message_obj.group_id)
-                cfg = load_group_config(group_id)
-                for uid, data in cfg.items():
-                    nick = event.get_sender_name()
+                for uid, record, entry in iter_group_users(group_id):
+                    nick = entry.get("nick") or record.get("nick")
                     if nick and re.search(re.escape(name), nick, re.IGNORECASE):
                         return uid
+        return None
+
+    def _build_image_component(self, img: str):
+        if not img:
+            return None
+        if img.startswith("http"):
+            return Image.fromURL(img)
+        path = os.path.join(IMG_DIR, img)
+        if os.path.exists(path):
+            return Image.fromFileSystem(path)
+        if self.image_base_url and isinstance(self.image_base_url, str) and self.image_base_url.startswith(("http://", "https://")):
+            join_url = self.image_base_url.rstrip("/") + "/" + img.lstrip("/")
+            return Image.fromURL(join_url)
         return None
 
     def _ensure_blind_box_group(self, today: str, uid: str, gid: str):
@@ -457,18 +777,20 @@ class WifePlugin(Star):
         # 抽盲盒主逻辑
         today = get_today()
         gid = str(event.message_obj.group_id)
+        cfg = load_group_config(gid)
         uid = str(event.get_sender_id())
         nick = event.get_sender_name()
         today_items = item_data.setdefault(today, {})
         user_items = today_items.get(uid)
-        allow_extra_draw = bool(get_user_meta(today, uid, "blind_box_extra_draw", False))
+        extra_draws = int(get_user_meta(today, uid, "blind_box_extra_draw", 0) or 0)
+        allow_extra_draw = extra_draws > 0
         if user_items is not None and not allow_extra_draw:
             yield event.plain_result(f"{nick}，你今天已经抽过盲盒啦，明天再来吧~")
             return
         had_items_before = user_items is not None and len(user_items) > 0
         existing_items = list(user_items or [])
         if allow_extra_draw:
-            set_user_meta(today, uid, "blind_box_extra_draw", False)
+            set_user_meta(today, uid, "blind_box_extra_draw", max(0, extra_draws - 1))
         count = random.randint(0, 3)
         if count == 0:
             today_items[uid] = existing_items
@@ -557,7 +879,7 @@ class WifePlugin(Star):
             save_item_data()
             day_record[uid] = used + 1
             save_reset_blind_box_records()
-            set_user_meta(today, uid, "blind_box_extra_draw", False)
+            set_user_meta(today, uid, "blind_box_extra_draw", 0)
             groups = list(get_user_meta(today, uid, "blind_box_groups", []) or [])
             if gid in groups:
                 groups.remove(gid)
@@ -574,7 +896,8 @@ class WifePlugin(Star):
                 groups = get_user_meta(today, target_uid, "blind_box_groups", [])
                 valid_groups = groups if isinstance(groups, list) else []
                 if gid in valid_groups:
-                    set_user_meta(today, target_uid, "blind_box_extra_draw", True)
+                    current_extra = int(get_user_meta(today, target_uid, "blind_box_extra_draw", 0) or 0)
+                    set_user_meta(today, target_uid, "blind_box_extra_draw", current_extra + 1)
                     affected += 1
             if affected == 0:
                 yield event.plain_result(f"{nick}，今天还没有需要重置盲盒的群成员哦~")
@@ -594,14 +917,18 @@ class WifePlugin(Star):
             return
         del today_items[target_uid]
         save_item_data()
-        set_user_meta(today, target_uid, "blind_box_extra_draw", False)
+        set_user_meta(today, target_uid, "blind_box_extra_draw", 0)
         groups = list(get_user_meta(today, target_uid, "blind_box_groups", []) or [])
         if gid in groups:
             groups.remove(gid)
             set_user_meta(today, target_uid, "blind_box_groups", groups)
-        cfg = load_group_config(gid)
-        target_data = cfg.get(target_uid, {}) if isinstance(cfg, dict) else {}
-        target_nick = target_data.get("nick", f"用户{target_uid}") if isinstance(target_data, dict) else f"用户{target_uid}"
+        target_record = get_group_record(target_uid, gid)
+        entry = wives_data.get(target_uid, {}) if isinstance(wives_data, dict) else {}
+        target_nick = (
+            (target_record or {}).get("nick")
+            or entry.get("nick")
+            or f"用户{target_uid}"
+        )
         yield event.plain_result(f"{nick}，已为 {target_nick} 重置盲盒次数并清空其今日道具。")
 
     async def view_items(self, event: AstrMessageEvent):
@@ -617,6 +944,66 @@ class WifePlugin(Star):
         items_text = "、".join(user_items)
         yield event.plain_result(f"{nick}，你当前拥有的道具卡：{items_text}")
 
+    async def view_status(self, event: AstrMessageEvent):
+        today = get_today()
+        uid = str(event.get_sender_id())
+        nick = event.get_sender_name()
+        gid = str(event.message_obj.group_id)
+        status_texts = []
+        if get_user_flag(today, uid, "protect_from_ntr"):
+            status_texts.append("纯爱战士：今日不可被牛走，也无法使用“换老婆”")
+        elif get_user_flag(today, uid, "ban_change"):
+            status_texts.append("换老婆禁用：今日无法使用“换老婆”指令")
+        if get_user_flag(today, uid, "ban_items"):
+            status_texts.append("贤者时间：今日无法使用任何道具卡")
+        if get_user_flag(today, uid, "harem"):
+            status_texts.append("开后宫：今日可以拥有多个老婆，但无法使用“换老婆”与“重置”指令")
+        if get_user_flag(today, uid, "ban_ntr"):
+            status_texts.append("公交车：今日无法使用“牛老婆”，但可以强制交换老婆")
+        if get_user_flag(today, uid, "ntr_override"):
+            status_texts.append("牛魔王：牛老婆成功率提升并无视禁用效果")
+        if get_user_flag(today, uid, "force_swap"):
+            status_texts.append("强制交换：使用“交换老婆”指令时无需对方同意")
+        if get_user_flag(today, uid, "landmine_girl"):
+            status_texts.append("病娇：你的老婆不会被牛走，但成功牛别人时可能遭遇惩罚")
+        if get_user_flag(today, uid, "ban_reject_swap"):
+            status_texts.append("苦主：无法拒绝交换，请谨慎应对")
+        if get_user_meta(today, uid, "victim_auto_ntr", False):
+            status_texts.append("苦主（受害）：别人对你使用“牛老婆”时必定成功")
+        if get_user_meta(today, uid, "next_ntr_guarantee", False):
+            status_texts.append("黄毛：下一次“牛老婆”必定成功")
+        comp_target = get_user_meta(today, uid, "competition_target", None)
+        if comp_target:
+            comp_uid = str(comp_target)
+            comp_record = get_group_record(comp_uid, gid) or {}
+            comp_entry = wives_data.get(comp_uid, {}) if isinstance(wives_data, dict) else {}
+            comp_name = comp_record.get("nick") or comp_entry.get("nick")
+            status_texts.append(f"雄竞：正在与{comp_name or f'用户{comp_uid}'}竞争同款老婆")
+        change_extra = int(get_user_mod(today, uid, "change_extra_uses", 0))
+        if change_extra > 0:
+            status_texts.append(f"额外换老婆次数：+{change_extra}")
+        ntr_extra = int(get_user_mod(today, uid, "ntr_extra_uses", 0))
+        if ntr_extra > 0:
+            status_texts.append(f"额外牛老婆次数：+{ntr_extra}")
+        group_bonus = int(get_group_meta(today, gid, "change_extra_uses", 0))
+        if group_bonus > 0:
+            status_texts.append(f"群加成：本群今日额外+{group_bonus}次“换老婆”机会")
+        if not status_texts:
+            yield event.plain_result(f"{nick}，你目前没有任何状态效果，安心抽老婆吧~")
+            return
+        msg = f"{nick}，你当前的状态效果：\n" + "\n".join(f"- {text}" for text in status_texts)
+        yield event.plain_result(msg)
+
+    async def show_wife_help(self, event: AstrMessageEvent):
+        nick = event.get_sender_name()
+        command_list = "、".join(sorted(self.commands.keys()))
+        item_list = "、".join(sorted(self.item_pool))
+        msg = (
+            f"{nick}，当前可用指令：{command_list}\n"
+            f"道具卡列表：{item_list}"
+        )
+        yield event.plain_result(msg)
+
     async def use_item(self, event: AstrMessageEvent):
         # 使用道具卡主逻辑（效果待实现）
         today = get_today()
@@ -631,13 +1018,15 @@ class WifePlugin(Star):
         if not content:
             yield event.plain_result(f"{nick}，请在“使用”后跟上道具名称哦~")
             return
-        card_name = re.split(r"\s+|@", content, maxsplit=1)[0]
+        parts = re.split(r"\s+|@", content, maxsplit=1)
+        card_name = parts[0] if parts else ""
         if not card_name:
             yield event.plain_result(f"{nick}，请明确要使用的道具名称哦~")
             return
         if card_name not in self.item_pool:
             yield event.plain_result(f"{nick}，暂未识别到名为“{card_name}”的道具卡~")
             return
+        extra_arg = content[len(card_name) :].strip()
         target_uid = self.parse_at_target(event)
         if card_name in self.items_need_target and not target_uid:
             yield event.plain_result(f"{nick}，使用“{card_name}”时请@目标哦~")
@@ -650,13 +1039,13 @@ class WifePlugin(Star):
         if card_name not in user_items:
             yield event.plain_result(f"{nick}，你今天的道具卡里没有“{card_name}”哦~")
             return
-        success, message = await self.apply_item_effect(card_name, event, target_uid)
+        success, message = await self.apply_item_effect(card_name, event, target_uid, extra_arg)
         if success:
             user_items.remove(card_name)
             save_item_data()
         yield event.plain_result(message or f"{nick}，道具卡“{card_name}”已处理。")
 
-    async def apply_item_effect(self, card_name, event, target_uid):
+    async def apply_item_effect(self, card_name, event, target_uid, extra_arg=""):
         # 分步实现各道具效果
         today = get_today()
         uid = str(event.get_sender_id())
@@ -664,29 +1053,41 @@ class WifePlugin(Star):
         gid = str(event.message_obj.group_id)
         cfg = load_group_config(gid)
         name = card_name
+        is_sleep_effect = name == "二度寝"
+        double_active = bool(get_user_meta(today, uid, "double_item_effect", False)) if not is_sleep_effect else False
+        double_factor = 2 if double_active else 1
+
+        def finalize(success_flag: bool, message: str | None):
+            if not is_sleep_effect and double_active and success_flag:
+                set_user_meta(today, uid, "double_item_effect", False)
+            return success_flag, message
         # ① 牛魔王：进攻+30%，自身被牛也+30%（不叠加 -> 取更大值）
         if name == "牛魔王":
             atk_now = float(get_user_mod(today, uid, "ntr_attack_bonus", 0.0))
             def_now = float(get_user_mod(today, uid, "ntr_defense_bonus", 0.0))
-            target_atk = max(atk_now, 0.3)
-            target_def = max(def_now, 0.3)
-            # 直接写入（使用 add_user_mod 的相对加法会叠加，这里用设置）
+            base_bonus = min(1.0, 0.3 * double_factor)
+            target_atk = max(atk_now, base_bonus)
+            target_def = max(def_now, base_bonus)
             eff = get_user_effects(today, uid)
             eff["mods"]["ntr_attack_bonus"] = target_atk
             eff["mods"]["ntr_defense_bonus"] = target_def
             set_user_flag(today, uid, "ntr_override", True)
+            base_total = (self.ntr_max or 0) + int(get_user_mod(today, uid, "ntr_extra_uses", 0))
+            if base_total > 0:
+                add_user_mod(today, uid, "ntr_extra_uses", base_total)
             save_effects()
-            return True, f"{nick}，牛魔王发动！今日牛成功率UP，但你的老婆也更容易被牛走......"
+            result = f"{nick}，牛魔王发动！今日牛成功率UP，牛老婆次数翻倍，但你的老婆也更容易被牛走......"
+            return finalize(True, result)
         # ② 开后宫：无法使用换老婆和重置指令，支持多老婆，有修罗场风险
         if name == "开后宫":
             set_user_flag(today, uid, "harem", True)
-            # 将现有老婆转换为后宫格式（如果还没有）
-            if uid in cfg:
-                data = cfg[uid]
-                if isinstance(data, list) and len(data) >= 2 and data[1] == today:
-                    cfg[uid] = {"harem": True, "wives": [data[0]], "date": today, "nick": nick}
-                    save_json(os.path.join(CONFIG_DIR, f"{gid}.json"), cfg)
-            return True, f"{nick}，你开启了后宫模式！今日无法使用换老婆和重置指令，可同时拥有多个老婆，但小心修罗场哦~"
+            rec = ensure_group_record(uid, gid, today, nick, keep_existing=True)
+            rec["harem"] = True
+            rec.setdefault("wives", [])
+            set_user_meta(today, uid, "harem_chaos_multiplier", float(double_factor))
+            save_group_config(cfg)
+            result = f"{nick}，你开启了后宫模式！今日无法使用换老婆和重置指令，可同时拥有多个老婆，但小心修罗场哦~"
+            return finalize(True, result)
         # ③ 贤者时间：清空当日前已生效效果，并禁止使用道具
         if name == "贤者时间":
             eff = get_user_effects(today, uid)
@@ -706,74 +1107,77 @@ class WifePlugin(Star):
                 "landmine_girl": False,
                 "ban_reject_swap": False,
             }
+            meta = eff["meta"]
+            meta["competition_prob"] = 0.3
+            meta["harem_chaos_multiplier"] = 1.0
+            meta["double_item_effect"] = False
+            meta["lost_wives"] = []
             save_effects()
-            return True, f"{nick}，你进入了贤者时间......"
+            result = f"{nick}，你进入了贤者时间......"
+            return finalize(True, result)
         # ④ 开impart：将今天所有拥有老婆的用户的老婆重新随机分配（开后宫用户保持原有数量，贤者时间用户不受影响）
         if name == "开impart":
             today_users = []
-            harem_users = {}  # {uid: wife_count}
+            harem_users = {}
             all_images = []
-            protected_users = set()  # 拥有贤者时间的用户
-            for u, rec in cfg.items():
-                # 检查是否拥有贤者时间效果
+            protected_users = set()
+            for u, rec, _ in iter_group_users(gid):
+                if rec.get("date") != today:
+                    continue
                 if get_user_flag(today, u, "ban_items"):
                     protected_users.add(u)
                     continue
-                if isinstance(rec, dict) and rec.get("harem") and rec.get("date") == today:
-                    wives = rec.get("wives", [])
-                    if wives:
-                        harem_users[u] = len(wives)
-                        all_images.extend(wives)
-                elif isinstance(rec, dict) and rec.get("date") == today:
-                    wives = rec.get("wives", [])
-                    if wives:
-                        today_users.append((u, wives[0]))  # 普通用户只有一个老婆
-                        all_images.append(wives[0])
+                wives = list(rec.get("wives", []))
+                if not wives:
+                    continue
+                if rec.get("harem"):
+                    harem_users[u] = len(wives)
+                    all_images.extend(wives)
+                else:
+                    today_users.append((u, wives[0]))
+                    all_images.append(wives[0])
             if len(today_users) + len(harem_users) < 2:
-                return False, "当前持有老婆的用户不足以进行重新分配~"
-            # 随机打乱所有图片
+                return finalize(False, "当前持有老婆的用户不足以进行重新分配~")
             random.shuffle(all_images)
             idx = 0
-            # 先分配给普通用户
             for u, _ in today_users:
                 if idx < len(all_images):
-                    # 获取用户信息
-                    user_data = cfg.get(u, {})
-                    user_nick = user_data.get("nick", f"用户{u}") if isinstance(user_data, dict) else f"用户{u}"
-                    cfg[u] = {"wives": [all_images[idx]], "date": today, "nick": user_nick}
+                    rec = ensure_group_record(u, gid, today, "", keep_existing=False)
+                    rec["wives"] = [all_images[idx]]
+                    rec["harem"] = False
                     idx += 1
-            # 再分配给开后宫用户，保持原有数量
             for u, count in harem_users.items():
                 if idx + count <= len(all_images):
-                    user_data = cfg.get(u, {})
-                    user_nick = user_data.get("nick", f"用户{u}") if isinstance(user_data, dict) else f"用户{u}"
-                    cfg[u] = {"harem": True, "wives": all_images[idx:idx+count], "date": today, "nick": user_nick}
+                    rec = ensure_group_record(u, gid, today, "", keep_existing=False)
+                    rec["harem"] = True
+                    rec["wives"] = all_images[idx:idx + count]
                     idx += count
-            save_json(os.path.join(CONFIG_DIR, f"{gid}.json"), cfg)
-            # 取消与变更相关的交换请求（不包括贤者时间用户）
+            save_group_config(cfg)
             all_owners = [u for u, _ in today_users] + list(harem_users.keys())
             cancel_msg = await self.cancel_swap_on_wife_change(gid, all_owners)
             msg = "已将所有今日拥有老婆的用户进行随机分配！"
             if protected_users:
-                msg += f"（拥有贤者时间的人不受影响）"
+                msg += "（拥有贤者时间的人不受影响）"
             if cancel_msg:
                 msg += f"\n{cancel_msg}"
-            return True, msg
+            return finalize(True, msg)
         # ⑤ 纯爱战士：今日不可被牛走，且无法使用换老婆
         if name == "纯爱战士":
             set_user_flag(today, uid, "protect_from_ntr", True)
             set_user_flag(today, uid, "ban_change", True)
-            return True, f"{nick}，你成为了纯爱战士！"
+            return finalize(True, f"{nick}，你成为了纯爱战士！")
         if name == "雄竞":
             if not target_uid:
                 return False, "使用“雄竞”时请@目标用户哦~"
             set_user_meta(today, uid, "competition_target", target_uid)
-            return True, f"{nick}，你向对方发起了雄竞！今日抽老婆有概率抽到与其相同的老婆。"
+            set_user_meta(today, uid, "competition_prob", clamp_probability(0.3 * double_factor))
+            result = f"{nick}，你向对方发起了雄竞！今日抽老婆有概率抽到与其相同的老婆。"
+            return finalize(True, result)
         if name == "苦主":
             set_user_meta(today, uid, "victim_auto_ntr", True)
             set_user_meta(today, uid, "ntr_penalty_stack", 0)
             set_user_flag(today, uid, "ban_reject_swap", True)
-            return True, f"{nick}，你成为了苦主......"
+            return finalize(True, f"{nick}，你成为了苦主......")
         if name == "黄毛":
             set_user_meta(today, uid, "next_ntr_guarantee", True)
             set_user_flag(today, uid, "ban_change", True)
@@ -786,10 +1190,10 @@ class WifePlugin(Star):
             ntr_rec = ntr_grp.get(uid, {"date": today, "count": 0})
             if ntr_rec.get("date") != today:
                 ntr_rec = {"date": today, "count": 0}
-            ntr_rec["count"] += change_count
+            ntr_rec["count"] += change_count * double_factor
             ntr_grp[uid] = ntr_rec
             save_ntr_records()
-            return True, f"{nick}，黄毛觉醒！下次牛老婆必定成功，但代价是......"
+            return finalize(True, f"{nick}，黄毛觉醒！下次牛老婆必定成功，但代价是......")
         # ⑥ 雌堕：50%让@目标成为你的老婆（头像图），50%你成为对方的老婆（头像图）（贤者时间用户不受影响）
         if name == "雌堕":
             if not target_uid:
@@ -805,12 +1209,12 @@ class WifePlugin(Star):
             if random.random() < 0.5:
                 img = get_avatar_url(target_uid)
                 add_wife(cfg, uid, img, today, nick, False)
-                save_json(os.path.join(CONFIG_DIR, f"{gid}.json"), cfg)
+                save_group_config(cfg)
                 cancel_msg = await self.cancel_swap_on_wife_change(gid, [uid, target_uid])
                 msg = f"{nick}，雌堕成功！对方成为你的老婆了。"
                 if cancel_msg:
                     msg += f"\n{cancel_msg}"
-                return True, msg
+                return finalize(True, msg)
             # 失败分支：你成为对方的老婆
             else:
                 img = get_avatar_url(uid)
@@ -821,12 +1225,12 @@ class WifePlugin(Star):
                 except:
                     target_nick = None
                 add_wife(cfg, target_uid, img, today, target_nick or f"用户{target_uid}", False)
-                save_json(os.path.join(CONFIG_DIR, f"{gid}.json"), cfg)
+                save_group_config(cfg)
                 cancel_msg = await self.cancel_swap_on_wife_change(gid, [uid, target_uid])
                 msg = f"{nick}，雌堕反噬......你成为了对方的老婆。"
                 if cancel_msg:
                     msg += f"\n{cancel_msg}"
-                return True, msg
+                return finalize(True, msg)
         # ⑩ 何意味：随机执行一个效果（增加新效果）
         if name == "何意味":
             choice = random.choice([
@@ -848,10 +1252,11 @@ class WifePlugin(Star):
             # 被禁言300秒
             if choice == "mute_300":
                 try:
-                    await event.bot.set_group_ban(group_id=int(gid), user_id=int(uid), duration=300)
+                    duration = 300 * double_factor
+                    await event.bot.set_group_ban(group_id=int(gid), user_id=int(uid), duration=int(duration))
                 except:
                     pass
-                return True, f"{nick}，何意味？你被禁言300秒......"
+                return finalize(True, f"{nick}，何意味？你被禁言{duration}秒......")
             # 使今天“换老婆”/“牛老婆”随机一个指令的使用次数翻倍
             if choice == "double_counter":
                 if random.random() < 0.5:
@@ -859,19 +1264,19 @@ class WifePlugin(Star):
                     rec = grp.get(uid, {"date": today, "count": 0})
                     if rec.get("date") != today:
                         rec = {"date": today, "count": 0}
-                    rec["count"] *= 2
+                    rec["count"] *= (2 * double_factor)
                     grp[uid] = rec
                     save_change_records()
-                    return True, f"{nick}，何意味？你今天的“换老婆”使用次数翻倍。"
+                    return finalize(True, f"{nick}，何意味？你今天的“换老婆”使用次数翻倍。")
                 else:
                     grp = ntr_records.setdefault(gid, {})
                     rec = grp.get(uid, {"date": today, "count": 0})
                     if rec.get("date") != today:
                         rec = {"date": today, "count": 0}
-                    rec["count"] *= 2
+                    rec["count"] *= (2 * double_factor)
                     grp[uid] = rec
                     save_ntr_records()
-                    return True, f"{nick}，何意味？你今天的“牛老婆”使用次数翻倍。"
+                    return finalize(True, f"{nick}，何意味？你今天的“牛老婆”使用次数翻倍。")
             # 使今天“换老婆”/“牛老婆”随机一个指令的使用次数变为0
             if choice == "zero_counter":
                 if random.random() < 0.5:
@@ -882,7 +1287,7 @@ class WifePlugin(Star):
                     rec["count"] = 0
                     grp[uid] = rec
                     save_change_records()
-                    return True, f"{nick}，何意味？你今天的“换老婆”使用次数清零。"
+                    return finalize(True, f"{nick}，何意味？你今天的“换老婆”使用次数清零。")
                 else:
                     grp = ntr_records.setdefault(gid, {})
                     rec = grp.get(uid, {"date": today, "count": 0})
@@ -891,77 +1296,30 @@ class WifePlugin(Star):
                     rec["count"] = 0
                     grp[uid] = rec
                     save_ntr_records()
-                    return True, f"{nick}，何意味？你今天的“牛老婆”使用次数清零。"
+                    return finalize(True, f"{nick}，何意味？你今天的“牛老婆”使用次数清零。")
             # 今天“换老婆”有50%概率不消耗指令使用次数
             if choice == "change_free_half":
-                current = float(get_user_meta(today, uid, "change_free_prob", 0.0) or 0.0)
-                set_user_meta(today, uid, "change_free_prob", max(current, 0.5))
-                return True, f"{nick}，何意味？你今天“换老婆”有概率不消耗次数。"
+                current = clamp_probability(get_user_meta(today, uid, "change_free_prob", 0.0) or 0.0)
+                set_user_meta(today, uid, "change_free_prob", clamp_probability(max(current, 0.5 * double_factor)))
+                return finalize(True, f"{nick}，何意味？你今天“换老婆”有概率不消耗次数。")
             # 今天“换老婆”有50%概率执行失败
             if choice == "change_fail_half":
-                current = float(get_user_meta(today, uid, "change_fail_prob", 0.0) or 0.0)
-                set_user_meta(today, uid, "change_fail_prob", max(current, 0.5))
-                return True, f"{nick}，何意味？你今天“换老婆”有概率执行失败。"
+                current = clamp_probability(get_user_meta(today, uid, "change_fail_prob", 0.0) or 0.0)
+                set_user_meta(today, uid, "change_fail_prob", clamp_probability(max(current, 0.5 * double_factor)))
+                return finalize(True, f"{nick}，何意味？你今天“换老婆”有概率执行失败。")
             # 将今天所有拥有老婆的用户的老婆重新随机分配（贤者时间用户不受影响）
             if choice == "impart":
-                today_users = []
-                harem_users = {}  # {uid: wife_count}
-                all_images = []
-                protected_users = set()  # 拥有贤者时间的用户
-                for u, rec in cfg.items():
-                    # 检查是否拥有贤者时间效果
-                    if get_user_flag(today, u, "ban_items"):
-                        protected_users.add(u)
-                        continue
-                    if isinstance(rec, dict) and rec.get("harem") and rec.get("date") == today:
-                        wives = rec.get("wives", [])
-                        if wives:
-                            harem_users[u] = len(wives)
-                            all_images.extend(wives)
-                    elif isinstance(rec, dict) and rec.get("date") == today:
-                        wives = rec.get("wives", [])
-                        if wives:
-                            today_users.append((u, wives[0]))  # 普通用户只有一个老婆
-                            all_images.append(wives[0])
-                if len(today_users) + len(harem_users) < 2:
-                    return True, f"{nick}，何意味？当前持有老婆的用户不足，随机分配未生效。"
-                # 随机打乱所有图片
-                random.shuffle(all_images)
-                idx = 0
-                # 先分配给普通用户
-                for u, _ in today_users:
-                    if idx < len(all_images):
-                        # 获取用户信息
-                        user_data = cfg.get(u, {})
-                        user_nick = user_data.get("nick", f"用户{u}") if isinstance(user_data, dict) else f"用户{u}"
-                        cfg[u] = {"wives": [all_images[idx]], "date": today, "nick": user_nick}
-                        idx += 1
-                # 再分配给开后宫用户，保持原有数量
-                for u, count in harem_users.items():
-                    if idx + count <= len(all_images):
-                        user_data = cfg.get(u, {})
-                        user_nick = user_data.get("nick", f"用户{u}") if isinstance(user_data, dict) else f"用户{u}"
-                        cfg[u] = {"harem": True, "wives": all_images[idx:idx+count], "date": today, "nick": user_nick}
-                        idx += count
-                save_json(os.path.join(CONFIG_DIR, f"{gid}.json"), cfg)
-                all_owners = [u for u, _ in today_users] + list(harem_users.keys())
-                cancel_msg = await self.cancel_swap_on_wife_change(gid, all_owners)
-                msg = "何意味？已将所有今日拥有老婆的用户进行随机分配！"
-                if protected_users:
-                    msg += f"（拥有贤者时间的用户不受影响）"
-                if cancel_msg:
-                    msg += f"\n{cancel_msg}"
-                return True, msg
+                return await self.apply_item_effect("开impart", event, target_uid, extra_arg)
             # 执行“换老婆”指令（本次不消耗次数）
             if choice == "do_change_once":
                 prev = float(get_user_meta(today, uid, "change_free_prob", 0.0) or 0.0)
-                set_user_meta(today, uid, "change_free_prob", 1.0)
+                set_user_meta(today, uid, "change_free_prob", clamp_probability(1.0))
                 # 执行一次换老婆
                 async for _ in self.change_wife(event):
                     pass
                 # 恢复之前概率（若之前大于1.0会被限制到1.0）
                 set_user_meta(today, uid, "change_free_prob", prev)
-                return True, f"{nick}，何意味？你的老婆跑了......"
+                return finalize(True, f"{nick}，何意味？你的老婆跑了......")
             # 随机生效两个效果
             if choice == "two_effects":
                 effects = ["mute_300", "double_counter", "zero_counter", "change_free_half", "change_fail_half"]
@@ -970,17 +1328,18 @@ class WifePlugin(Star):
                 for eff in selected:
                     if eff == "mute_300":
                         try:
-                            await event.bot.set_group_ban(group_id=int(gid), user_id=int(uid), duration=300)
+                            duration = 300 * double_factor
+                            await event.bot.set_group_ban(group_id=int(gid), user_id=int(uid), duration=duration)
                         except:
                             pass
-                        msgs.append("被禁言300秒")
+                        msgs.append(f"被禁言{duration}秒")
                     elif eff == "double_counter":
                         if random.random() < 0.5:
                             grp = change_records.setdefault(gid, {})
                             rec = grp.get(uid, {"date": today, "count": 0})
                             if rec.get("date") != today:
                                 rec = {"date": today, "count": 0}
-                            rec["count"] *= 2
+                            rec["count"] *= (2 * double_factor)
                             grp[uid] = rec
                             save_change_records()
                             msgs.append("换老婆次数翻倍")
@@ -989,7 +1348,7 @@ class WifePlugin(Star):
                             rec = grp.get(uid, {"date": today, "count": 0})
                             if rec.get("date") != today:
                                 rec = {"date": today, "count": 0}
-                            rec["count"] *= 2
+                            rec["count"] *= (2 * double_factor)
                             grp[uid] = rec
                             save_ntr_records()
                             msgs.append("牛老婆次数翻倍")
@@ -1013,39 +1372,43 @@ class WifePlugin(Star):
                             save_ntr_records()
                             msgs.append("牛老婆次数清零")
                     elif eff == "change_free_half":
-                        current = float(get_user_meta(today, uid, "change_free_prob", 0.0) or 0.0)
-                        set_user_meta(today, uid, "change_free_prob", max(current, 0.5))
+                        current = clamp_probability(get_user_meta(today, uid, "change_free_prob", 0.0) or 0.0)
+                        set_user_meta(today, uid, "change_free_prob", clamp_probability(max(current, 0.5 * double_factor)))
+                        current = clamp_probability(get_user_meta(today, uid, "change_free_prob", 0.0) or 0.0)
+                        set_user_meta(today, uid, "change_free_prob", max(current, min(1.0, 0.5 * double_factor)))
                         msgs.append("换老婆有概率不消耗次数")
                     elif eff == "change_fail_half":
                         current = float(get_user_meta(today, uid, "change_fail_prob", 0.0) or 0.0)
-                        set_user_meta(today, uid, "change_fail_prob", max(current, 0.5))
+                        set_user_meta(today, uid, "change_fail_prob", max(current, min(1.0, 0.5 * double_factor)))
                         msgs.append("换老婆有概率执行失败")
-                return True, f"{nick}，何意味？随机生效两个效果（{', '.join(msgs)}）。"
+                return finalize(True, f"{nick}，何意味？随机生效两个效果（{', '.join(msgs)}）。")
             # 随机获得一张道具卡
             if choice == "random_item":
                 today_items = item_data.setdefault(today, {})
                 user_items = today_items.setdefault(uid, [])
-                random_item = random.choice(self.item_pool)
-                user_items.append(random_item)
+                drawn = random.choices(self.item_pool, k=double_factor)
+                user_items.extend(drawn)
                 save_item_data()
-                return True, f"{nick}，何意味？你获得了道具卡「{random_item}」。"
+                items_text = "、".join(drawn)
+                return finalize(True, f"{nick}，何意味？你获得了道具卡「{items_text}」。")
             # 获得一次抽盲盒的机会
             if choice == "draw_chance":
-                set_user_meta(today, uid, "blind_box_extra_draw", True)
-                return True, f"{nick}，何意味？你获得了一次额外的抽盲盒机会。"
+                current_extra = int(get_user_meta(today, uid, "blind_box_extra_draw", 0) or 0)
+                set_user_meta(today, uid, "blind_box_extra_draw", current_extra + double_factor)
+                return finalize(True, f"{nick}，何意味？你获得了{double_factor}次额外的抽盲盒机会。")
             # 随机获得两张道具卡
             if choice == "two_items":
                 today_items = item_data.setdefault(today, {})
                 user_items = today_items.setdefault(uid, [])
-                random_items = random.choices(self.item_pool, k=2)
+                random_items = random.choices(self.item_pool, k=2 * double_factor)
                 user_items.extend(random_items)
                 save_item_data()
                 items_text = "、".join(random_items)
-                return True, f"{nick}，何意味？你获得了道具卡：{items_text}。"
+                return finalize(True, f"{nick}，何意味？你获得了道具卡：{items_text}。")
             # 今日不能再使用道具卡
             if choice == "ban_items":
                 set_user_flag(today, uid, "ban_items", True)
-                return True, f"{nick}，何意味？你今天不能再使用道具卡了。"
+                return finalize(True, f"{nick}，何意味？你今天不能再使用道具卡了。")
             # 失去你当前所有的道具卡
             if choice == "lose_all_items":
                 today_items = item_data.setdefault(today, {})
@@ -1053,8 +1416,8 @@ class WifePlugin(Star):
                     lost_count = len(today_items[uid])
                     del today_items[uid]
                     save_item_data()
-                    return True, f"{nick}，何意味？你失去了所有道具卡（共{lost_count}张）。"
-                return True, f"{nick}，何意味？你失去了所有道具卡（你本来就没有）。"
+                    return finalize(True, f"{nick}，何意味？你失去了所有道具卡（共{lost_count}张）。")
+                return finalize(True, f"{nick}，何意味？你失去了所有道具卡（你本来就没有）。")
             if choice == "force_use_item":
                 today_items = item_data.setdefault(today, {})
                 user_items = today_items.get(uid, [])
@@ -1063,39 +1426,79 @@ class WifePlugin(Star):
                     if card not in self.items_need_target and card != "何意味"
                 ]
                 if not available:
-                    return True, f"{nick}，何意味？你没有可以强制使用的道具卡。"
+                    return finalize(True, f"{nick}，何意味？你没有可以强制使用的道具卡。")
                 forced_card = random.choice(available)
                 user_items.remove(forced_card)
                 save_item_data()
                 forced_success, forced_message = await self.apply_item_effect(forced_card, event, None)
                 msg_prefix = f"{nick}，何意味？强制使用了「{forced_card}」。"
                 if forced_success and forced_message:
-                    return True, f"{msg_prefix}\n{forced_message}"
-                return True, msg_prefix
+                    return finalize(True, f"{msg_prefix}\n{forced_message}")
+                return finalize(True, msg_prefix)
         # 新增道具卡效果
+        if name == "二度寝":
+            set_user_meta(today, uid, "double_item_effect", True)
+            return True, f"{nick}，二度寝成功！你的下一张道具卡效果将翻倍。"
         # ① 白月光：今天获得一次"选老婆"的使用次数
         if name == "白月光":
-            add_user_mod(today, uid, "select_wife_uses", 1)
-            return True, f"{nick}，你获得了一次「选老婆」的使用次数。"
+            add_user_mod(today, uid, "select_wife_uses", 1 * double_factor)
+            return finalize(True, f"{nick}，你获得了{1 * double_factor}次「选老婆」的使用次数。")
         # ② 公交车：今天你对其他人使用"交换老婆"指令时无需经过对方同意，强制交换，但你今天无法使用"牛老婆"指令
         if name == "公交车":
             set_user_flag(today, uid, "force_swap", True)
             set_user_flag(today, uid, "ban_ntr", True)
-            return True, f"{nick}，公交车已发车！你今天可以强制交换老婆！但代价是......"
+            return finalize(True, f"{nick}，公交车已发车！你今天可以强制交换老婆！但代价是......")
         # ③ 病娇：今天你的老婆不会被别人使用"牛老婆"牛走，但当你在有老婆的情况下成功使用"牛老婆"指令牛走别人的老婆时，随机触发事件
         if name == "病娇":
             set_user_flag(today, uid, "landmine_girl", True)
-            return True, f"{nick}，你的老婆变成了病娇..."
+            return finalize(True, f"{nick}，你的老婆变成了病娇...")
         # ④ 儒夫：今天你获得10次"打老婆"使用次数
         if name == "儒夫":
-            add_user_mod(today, uid, "beat_wife_uses", 10)
-            return True, f"{nick}，儒家思想已融入你的血液，你今天获得了10次「打老婆」的使用次数。"
+            add_user_mod(today, uid, "beat_wife_uses", 10 * double_factor)
+            return finalize(True, f"{nick}，儒家思想已融入你的血液，你今天获得了{10 * double_factor}次「打老婆」的使用次数。")
         # ⑤ 熊出没：今天你可以使用"勾引"指令无数次，但每次使用有25%概率被禁言120秒
         if name == "熊出没":
             add_user_mod(today, uid, "seduce_uses", -1)  # -1表示无限
-            return True, f"{nick}，熊出没已上线！你今天可以无限使用「勾引」指令"
+            return finalize(True, f"{nick}，熊出没已上线！你今天可以无限使用「勾引」指令")
+        if name == "宝刀未老":
+            grp = ntr_records.setdefault(gid, {})
+            rec = grp.get(uid, {"date": today, "count": 0})
+            if rec.get("date") != today:
+                rec = {"date": today, "count": 0}
+            if rec.get("count", 0) < self.ntr_max:
+                return finalize(False, f"{nick}，只有今天已经用完全部「牛老婆」次数时才能使用「宝刀未老」哦~")
+            add_user_mod(today, uid, "ntr_extra_uses", 4 * double_factor)
+            return finalize(True, f"{nick}，宝刀未老！你今天额外获得{4 * double_factor}次「牛老婆」机会。")
+        if name == "龙王":
+            lost_wives = get_user_meta(today, uid, "lost_wives", [])
+            if not isinstance(lost_wives, list) or not lost_wives:
+                return finalize(False, "隐忍，还未到使用的时候......")
+            set_user_flag(today, uid, "harem", True)
+            set_user_meta(today, uid, "harem_chaos_multiplier", float(double_factor))
+            rec = ensure_group_record(uid, gid, today, nick, keep_existing=True)
+            rec["harem"] = True
+            for w in lost_wives:
+                if isinstance(w, str) and w not in rec["wives"]:
+                    rec["wives"].append(w)
+            set_user_meta(today, uid, "lost_wives", [])
+            save_group_config(cfg)
+            return finalize(True, f"{nick}，龙王降临！你开启了后宫模式，并取回了所有被牛走的老婆。")
+        if name == "鹿鹿时间到了":
+            add_group_meta(today, gid, "change_extra_uses", 1 * double_factor)
+            return finalize(True, f"{nick}，「鹿鹿时间到了」为本群所有人增加了{1 * double_factor}次「换老婆」机会！")
+        if name == "开明盒":
+            desired = extra_arg.strip()
+            if not desired:
+                return finalize(False, f"{nick}，请在“使用开明盒”后写上想要的道具卡名称哦~")
+            if desired not in self.item_pool:
+                return finalize(False, f"{nick}，暂未识别到名为“{desired}”的道具卡，请重新选择~")
+            today_items = item_data.setdefault(today, {})
+            user_items = today_items.setdefault(uid, [])
+            user_items.append(desired)
+            save_item_data()
+            return finalize(True, f"{nick}，你打开了开明盒，获得了自选道具卡「{desired}」！")
         # 其他未实现
-        return False, f"道具卡「{card_name}」的效果正在开发中，敬请期待~"
+        return finalize(False, f"道具卡「{card_name}」的效果正在开发中，敬请期待~")
 
     async def animewife(self, event: AstrMessageEvent):
         # 抽老婆主逻辑
@@ -1119,12 +1522,14 @@ class WifePlugin(Star):
             if wife_count > 0:
                 # 检查修罗场触发
                 if wife_count >= 2:
-                    prob = (wife_count - 1) * 0.1
+                    chaos_multiplier = float(get_user_meta(today, uid, "harem_chaos_multiplier", 1.0) or 1.0)
+                    prob = (wife_count - 1) * 0.1 * chaos_multiplier
+                    prob = min(prob, 0.9)
                     if random.random() < prob:
                         # 触发修罗场，失去所有老婆
                         if uid in cfg:
                             del cfg[uid]
-                        save_json(os.path.join(CONFIG_DIR, f"{gid}.json"), cfg)
+                        save_group_config(cfg)
                         yield event.plain_result(f"{nick}，修罗场爆发！你失去了所有老婆......")
                         return
         else:
@@ -1138,16 +1543,10 @@ class WifePlugin(Star):
                     text = f"{nick}，你今天的老婆是来自《{source}》的{chara}，请好好珍惜哦~"
                 else:
                     text = f"{nick}，你今天的老婆是{name}，请好好珍惜哦~"
-                path = os.path.join(IMG_DIR, img)
-                if img.startswith("http"):
-                    chain = [Plain(text), Image.fromURL(img)]
-                elif os.path.exists(path):
-                    chain = [Plain(text), Image.fromFileSystem(path)]
+                image_component = self._build_image_component(img)
+                if image_component:
+                    yield event.chain_result([Plain(text), image_component])
                 else:
-                    chain = [Plain(text), Image.fromURL(self.image_base_url + img)]
-                try:
-                    yield event.chain_result(chain)
-                except:
                     yield event.plain_result(text)
                 return
         # 开始抽取新老婆
@@ -1190,11 +1589,12 @@ class WifePlugin(Star):
         comp_target = get_user_meta(today, uid, "competition_target", None)
         if comp_target:
             target_wives = get_wives_list(cfg, comp_target, today)
-            if target_wives and random.random() < 0.3:
+            competition_prob = clamp_probability(get_user_meta(today, uid, "competition_prob", 0.3) or 0.3)
+            if target_wives and random.random() < competition_prob:
                 img = random.choice(target_wives)
         # 统一使用add_wife函数添加老婆
         add_wife(cfg, uid, img, today, nick, is_harem)
-        save_json(os.path.join(CONFIG_DIR, f"{gid}.json"), cfg)
+        save_group_config(cfg)
         if is_harem:
             # 增加抽老婆次数（使用换老婆记录）
             change_recs = change_records.setdefault(gid, {})
@@ -1221,16 +1621,10 @@ class WifePlugin(Star):
                 text = f"{nick}，你今天的老婆是{name}，请好好珍惜哦~"
             else:
                 text += name
-        path = os.path.join(IMG_DIR, img)
-        if img.startswith("http"):
-            chain = [Plain(text), Image.fromURL(img)]
-        elif os.path.exists(path):
-            chain = [Plain(text), Image.fromFileSystem(path)]
+        image_component = self._build_image_component(img)
+        if image_component:
+            yield event.chain_result([Plain(text), image_component])
         else:
-            chain = [Plain(text), Image.fromURL(self.image_base_url + img)]
-        try:
-            yield event.chain_result(chain)
-        except:
             yield event.plain_result(text)
 
     async def ntr_wife(self, event: AstrMessageEvent):
@@ -1254,9 +1648,11 @@ class WifePlugin(Star):
         rec = grp.get(uid, {"date": today, "count": 0})
         if rec["date"] != today:
             rec = {"date": today, "count": 0}
-        if rec["count"] >= self.ntr_max:
+        extra_ntr = int(get_user_mod(today, uid, "ntr_extra_uses", 0))
+        max_ntr = (self.ntr_max or 0) + extra_ntr
+        if rec["count"] >= max_ntr:
             yield event.plain_result(
-                f"{nick}，你今天已经牛了{self.ntr_max}次啦，明天再来吧~"
+                f"{nick}，你今天已经牛了{max_ntr}次啦，明天再来吧~"
             )
             return
         tid = self.parse_target(event)
@@ -1284,7 +1680,7 @@ class WifePlugin(Star):
         # 计算经由效果修正后的成功概率
         attack_bonus = float(get_user_mod(today, uid, "ntr_attack_bonus", 0.0))
         defense_bonus = float(get_user_mod(today, tid, "ntr_defense_bonus", 0.0))
-        final_prob = max(0.0, min(1.0, (self.ntr_possibility or 0.0) + attack_bonus + defense_bonus))
+        final_prob = max(0.0, min(0.9, (self.ntr_possibility or 0.0) + attack_bonus + defense_bonus))
         forced_success = False
         if get_user_meta(today, uid, "next_ntr_guarantee", False):
             forced_success = True
@@ -1301,6 +1697,15 @@ class WifePlugin(Star):
                 yield event.plain_result("对方今天还没有老婆可牛哦~")
                 return
             wife = random.choice(target_wives)
+            if get_user_flag(today, uid, "protect_from_ntr"):
+                yield event.plain_result("坚守纯爱的你拒绝了牛来的老婆，不要违背自己的内心哦")
+                return
+            lost_wives = get_user_meta(today, tid, "lost_wives", [])
+            if not isinstance(lost_wives, list):
+                lost_wives = []
+            if wife not in lost_wives:
+                lost_wives.append(wife)
+            set_user_meta(today, tid, "lost_wives", lost_wives)
             # 从目标处移除老婆
             if is_harem_user(cfg, tid):
                 cfg[tid]["wives"].remove(wife)
@@ -1337,7 +1742,7 @@ class WifePlugin(Star):
                     # 你原本的老婆自杀了（即原本的老婆将消失，你牛到的老婆也不会添加到你的wives列表）
                     if uid in cfg:
                         del cfg[uid]
-                    save_json(os.path.join(CONFIG_DIR, f"{gid}.json"), cfg)
+                    save_group_config(cfg)
                     yield event.plain_result(f"{nick}，你的老婆自杀了......你失去了所有老婆。")
                     return
                 elif event_choice == "get_item":
@@ -1351,7 +1756,7 @@ class WifePlugin(Star):
             # 给攻击者添加老婆
             is_attacker_harem = is_harem_user(cfg, uid)
             add_wife(cfg, uid, wife, today, nick, is_attacker_harem)
-            save_json(os.path.join(CONFIG_DIR, f"{gid}.json"), cfg)
+            save_group_config(cfg)
             # 检查并取消相关交换请求
             cancel_msg = await self.cancel_swap_on_wife_change(gid, [uid, tid])
             yield event.plain_result(f"{nick}，牛老婆成功！老婆已归你所有，恭喜恭喜~")
@@ -1404,15 +1809,10 @@ class WifePlugin(Star):
                     text += f"，共有{len(wives)}个老婆，羡慕吗？"
                 else:
                     text += "，"
-                path = os.path.join(IMG_DIR, img)
-                chain = [
-                    Plain(text),
-                    (Image.fromURL(img) if img.startswith("http")
-                     else (Image.fromFileSystem(path) if os.path.exists(path) else Image.fromURL(self.image_base_url + img))),
-                ]
-                try:
-                    yield event.chain_result(chain)
-                except:
+                image_component = self._build_image_component(img)
+            if image_component:
+                yield event.chain_result([Plain(text), image_component])
+            else:
                     yield event.plain_result(text)
         else:
             # 普通用户：显示单个老婆
@@ -1431,22 +1831,10 @@ class WifePlugin(Star):
                     text = f"{owner}的老婆是来自《{source}》的{chara}，羡慕吗？"
                 else:
                     text = f"{owner}的老婆是{name}，羡慕吗？"
-            path = os.path.join(IMG_DIR, img)
-            chain = [
-                Plain(text),
-                (
-                    Image.fromURL(img)
-                    if img.startswith("http")
-                    else (
-                        Image.fromFileSystem(path)
-                        if os.path.exists(path)
-                        else Image.fromURL(self.image_base_url + img)
-                    )
-                ),
-            ]
-            try:
-                yield event.chain_result(chain)
-            except:
+            image_component = self._build_image_component(img)
+            if image_component:
+                yield event.chain_result([Plain(text), image_component])
+            else:
                 yield event.plain_result(text)
         # # 解析出处和角色名，分隔符为!
         # if "!" in name:
@@ -1501,7 +1889,8 @@ class WifePlugin(Star):
             rec = {"date": today, "count": 0}
             recs[uid] = rec
         # 普通用户：额外可用次数修正
-        max_change = (self.change_max_per_day or 0) + int(get_user_mod(today, uid, "change_extra_uses", 0))
+        group_bonus = int(get_group_meta(today, gid, "change_extra_uses", 0))
+        max_change = (self.change_max_per_day or 0) + int(get_user_mod(today, uid, "change_extra_uses", 0)) + group_bonus
         if rec["count"] >= max_change:
             yield event.plain_result(
                 f"{nick}，你今天已经换了{max_change}次老婆啦，明天再来吧~"
@@ -1522,7 +1911,7 @@ class WifePlugin(Star):
             yield event.plain_result(f"{nick}，修罗场余波未散，明天再来吧......")
             return
         consume = True
-        free_prob = float(get_user_meta(today, uid, "change_free_prob", 0.0) or 0.0)
+        free_prob = clamp_probability(get_user_meta(today, uid, "change_free_prob", 0.0) or 0.0)
         if free_prob > 0 and random.random() < free_prob:
             consume = False
         free_msg = ""
@@ -1530,7 +1919,7 @@ class WifePlugin(Star):
             free_msg = "（本次未消耗次数）"
         if not is_harem:
             # 普通用户已在上面的else分支删除
-            save_json(os.path.join(CONFIG_DIR, f"{gid}.json"), cfg)
+            save_group_config(cfg)
         if consume:
             rec["count"] += 1
         recs[uid] = rec
@@ -1719,7 +2108,7 @@ class WifePlugin(Star):
                 # 交换老婆
                 cfg[uid] = {"wives": [wives_t[0]], "date": today, "nick": nick_u}
                 cfg[tid] = {"wives": [wives_u[0]], "date": today, "nick": nick_t}
-                save_json(os.path.join(CONFIG_DIR, f"{gid}.json"), cfg)
+                save_group_config(cfg)
                 cancel_msg = await self.cancel_swap_on_wife_change(gid, [uid, tid])
                 yield event.plain_result(f"{nick}，公交车效果发动！强制交换成功！")
                 if cancel_msg:
@@ -1797,7 +2186,7 @@ class WifePlugin(Star):
             # 交换老婆
             cfg[uid] = {"wives": [wives_t[0]], "date": today, "nick": nick_u}
             cfg[tid] = {"wives": [wives_u[0]], "date": today, "nick": nick_t}
-        save_json(os.path.join(CONFIG_DIR, f"{gid}.json"), cfg)
+        save_group_config(cfg)
         del grp[uid]
         save_swap_requests()
         # 检查并取消相关交换请求
@@ -1939,7 +2328,7 @@ class WifePlugin(Star):
         # 检查是否开后宫
         is_harem = get_user_flag(today, uid, "harem")
         add_wife(cfg, uid, img, today, nick, is_harem)
-        save_json(os.path.join(CONFIG_DIR, f"{gid}.json"), cfg)
+        save_group_config(cfg)
         # 解析出处和角色名
         name = os.path.splitext(img)[0]
         if "!" in name:
@@ -1947,16 +2336,10 @@ class WifePlugin(Star):
             text = f"{nick}，你选择了来自《{source}》的{chara}作为你的老婆，请好好珍惜哦~"
         else:
             text = f"{nick}，你选择了{name}作为你的老婆，请好好珍惜哦~"
-        path = os.path.join(IMG_DIR, img)
-        if img.startswith("http"):
-            chain = [Plain(text), Image.fromURL(img)]
-        elif os.path.exists(path):
-            chain = [Plain(text), Image.fromFileSystem(path)]
+        image_component = self._build_image_component(img)
+        if image_component:
+            yield event.chain_result([Plain(text), image_component])
         else:
-            chain = [Plain(text), Image.fromURL(self.image_base_url + img)]
-        try:
-            yield event.chain_result(chain)
-        except:
             yield event.plain_result(text)
 
     async def beat_wife(self, event: AstrMessageEvent):
@@ -1983,7 +2366,7 @@ class WifePlugin(Star):
         if not has_landmine and random.random() < 0.3:
             if uid in cfg:
                 del cfg[uid]
-                save_json(os.path.join(CONFIG_DIR, f"{gid}.json"), cfg)
+                save_group_config(cfg)
             cancel_msg = await self.cancel_swap_on_wife_change(gid, [uid])
             yield event.plain_result(f"{nick}，你下手太狠了，老婆伤心地离开了你......你失去了所有老婆。")
             if cancel_msg:
@@ -2079,7 +2462,7 @@ class WifePlugin(Star):
             img = get_avatar_url(target_uid)
             is_harem = get_user_flag(today, uid, "harem")
             add_wife(cfg, uid, img, today, nick, is_harem)
-            save_json(os.path.join(CONFIG_DIR, f"{gid}.json"), cfg)
+            save_group_config(cfg)
             cancel_msg = await self.cancel_swap_on_wife_change(gid, [uid, target_uid])
             msg = f"{nick}，勾引成功！对方已经拜倒在你的脂包肌下了。"
             if cancel_msg:
