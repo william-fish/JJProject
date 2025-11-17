@@ -30,6 +30,7 @@ SEDUCE_RECORDS_FILE = os.path.join(CONFIG_DIR, "seduce_records.json")
 RESET_BLIND_BOX_RECORDS_FILE = os.path.join(CONFIG_DIR, "reset_blind_box_records.json")
 MARKET_FILE = os.path.join(CONFIG_DIR, "market.json")
 MARKET_PURCHASE_RECORDS_FILE = os.path.join(CONFIG_DIR, "market_purchase_records.json")
+GIFT_REQUESTS_FILE = os.path.join(CONFIG_DIR, "gift_requests.json")
 
 
 def get_today():
@@ -87,6 +88,24 @@ def load_market_purchase_records():
 def save_market_purchase_records():
     save_json(MARKET_PURCHASE_RECORDS_FILE, market_purchase_records)
 
+gift_requests = {}
+def load_gift_requests():
+    global gift_requests
+    gift_requests = load_json(GIFT_REQUESTS_FILE)
+
+def save_gift_requests():
+    save_json(GIFT_REQUESTS_FILE, gift_requests)
+
+def cleanup_gift_requests():
+    today = get_today()
+    removed = False
+    for day in list(gift_requests.keys()):
+        if day != today:
+            del gift_requests[day]
+            removed = True
+    if removed:
+        save_gift_requests()
+
 
 def load_change_records():
     raw = load_json(CHANGE_RECORDS_FILE)
@@ -125,6 +144,7 @@ RESERVED_CONFIG_FILES = {
     os.path.basename(SEDUCE_RECORDS_FILE),
     os.path.basename(RESET_BLIND_BOX_RECORDS_FILE),
     os.path.basename(GLOBAL_WIFE_FILE),
+    os.path.basename(GIFT_REQUESTS_FILE),
 }
 
 
@@ -379,7 +399,7 @@ def get_wives_list(arg1, arg2, today: str) -> list:
     return []
 
 
-def add_wife(arg1, arg2, img: str, date: str, nick: str, is_harem: bool = False):
+def add_wife(arg1, arg2, img: str, date: str, nick: str, is_harem: bool = False, allow_shura: bool = False) -> bool:
     if isinstance(arg1, dict):
         cfg = arg1
         uid = arg2
@@ -388,7 +408,11 @@ def add_wife(arg1, arg2, img: str, date: str, nick: str, is_harem: bool = False)
         uid = arg1
         gid = arg2
         cfg = None
-    record = ensure_group_record(uid, gid, date, nick, keep_existing=is_harem)
+    uid_str = str(uid)
+    is_shura = get_user_flag(date, uid_str, "shura")
+    if is_shura and not allow_shura:
+        return False
+    record = ensure_group_record(uid_str, gid, date, nick, keep_existing=is_harem)
     if is_harem:
         record["harem"] = True
         if img not in record["wives"]:
@@ -396,8 +420,18 @@ def add_wife(arg1, arg2, img: str, date: str, nick: str, is_harem: bool = False)
     else:
         record["harem"] = False
         record["wives"] = [img]
+    if is_shura and record.get("harem"):
+        wives_list = record.get("wives", [])
+        max_limit = 6
+        while len(wives_list) > max_limit:
+            if len(wives_list) <= 1:
+                break
+            remove_idx = random.randrange(0, len(wives_list) - 1)
+            wives_list.pop(remove_idx)
+        record["wives"] = wives_list
     if isinstance(cfg, dict):
-        dict.__setitem__(cfg, str(uid), record)
+        dict.__setitem__(cfg, uid_str, record)
+    return True
 
 
 class GroupConfigDict(dict):
@@ -566,6 +600,9 @@ def get_user_effects(today: str, uid: str) -> dict:
                 "rich_bro": False,  # 富哥
                 "share_bonus": False,  # 见者有份
                 "learned": False,  # 长一智
+                "lightbulb": False,  # 电灯泡
+                "lucky_e": False,  # 幸运E
+                "shura": False,  # 修罗
             },
             "meta": {
                 "ntr_penalty_stack": 0,  # 苦主：失去老婆次数增量 -> 换老婆额外次数
@@ -576,6 +613,7 @@ def get_user_effects(today: str, uid: str) -> dict:
                 "lost_wives": [],  # 今日被牛走的老婆
                 "stick_hero_wives": [],  # 棍勇已获得的老婆列表（用于不重复获得）
                 "future_diary_target": None,  # 未来日记：下次抽老婆或换老婆的目标关键词
+                "lightbulb_group": None,  # 电灯泡监听群
             },
         }
         day_map[uid] = eff
@@ -652,6 +690,8 @@ load_seduce_records()
 load_reset_blind_box_records()
 load_market_data()
 load_market_purchase_records()
+load_gift_requests()
+cleanup_gift_requests()
 
 
 @register(
@@ -674,6 +714,8 @@ class WifePlugin(Star):
         self.reset_mute_duration = config.get("reset_mute_duration")
         self.image_base_url = config.get("image_base_url")
         self.swap_max_per_day = config.get("swap_max_per_day")
+        self.market_max_wives = 16
+        self.market_max_items = 8
         self.item_pool = [
             "牛魔王",
             "开后宫",
@@ -684,6 +726,7 @@ class WifePlugin(Star):
             "雄竞",
             "苦主",
             "黄毛",
+            "吃一堑",
             "何意味",
             "白月光",
             "公交车",
@@ -709,29 +752,245 @@ class WifePlugin(Star):
             "偷外卖",
             "富哥",
             "疯狂星期四",
+            "赠人玫瑰",
+            "南北西",
+            "城管",
+            "仓管",
+            "电灯泡",
+            "枪兵",
+            "修罗",
         ]
         self.items_need_target = {"雌堕", "雄竞", "勾引", "牛道具", "偷拍", "复读", "会员制餐厅"}
+        # 状态效果判定工具
+        def flag_checker(flag_key: str):
+            return lambda eff, key=flag_key: eff["flags"].get(key, False)
+
+        def any_flag_checker(*flag_keys: str):
+            return lambda eff, keys=flag_keys: any(eff["flags"].get(k, False) for k in keys)
+
+        def mod_equals_checker(mod_key: str, expected):
+            return lambda eff, mod=mod_key, val=expected: eff["mods"].get(mod) == val
+
+        def meta_exists_checker(meta_key: str):
+            return lambda eff, meta=meta_key: bool(eff["meta"].get(meta))
+
+        def meta_equals_checker(meta_key: str, expected):
+            return lambda eff, meta=meta_key, val=expected: eff["meta"].get(meta) == val
+
+        self.status_effect_specs = [
+            {
+                "id": "harem",
+                "label": "开后宫",
+                "desc": "开后宫：今日可以拥有多个老婆，但无法使用「换老婆」与「重置」指令",
+                "item_name": "开后宫",
+                "checker": flag_checker("harem"),
+            },
+            {
+                "id": "protect_from_ntr",
+                "label": "纯爱战士",
+                "desc": "纯爱战士：今日老婆不会被牛走，也无法使用「换老婆」",
+                "item_name": "纯爱战士",
+                "checker": flag_checker("protect_from_ntr"),
+            },
+            {
+                "id": "ban_change",
+                "label": "换老婆禁用",
+                "desc": "换老婆禁用：今日无法使用「换老婆」指令",
+                "checker": flag_checker("ban_change"),
+            },
+            {
+                "id": "ban_items",
+                "label": "贤者时间",
+                "desc": "贤者时间：今日不受任何道具影响，也无法使用道具",
+                "item_name": "贤者时间",
+                "checker": flag_checker("ban_items"),
+            },
+            {
+                "id": "ban_ntr",
+                "label": "公交车",
+                "desc": "公交车：今日无法使用「牛老婆」，但可以强制交换老婆",
+                "item_name": "公交车",
+                "checker": any_flag_checker("ban_ntr", "force_swap"),
+            },
+            {
+                "id": "ntr_override",
+                "label": "牛魔王",
+                "desc": "牛魔王：牛老婆成功率提升并无视禁用效果，从其它渠道获得次数翻倍",
+                "item_name": "牛魔王",
+                "checker": flag_checker("ntr_override"),
+            },
+            {
+                "id": "landmine_girl",
+                "label": "病娇",
+                "desc": "病娇：你的老婆不会被牛走，但成功牛别人时可能遭遇惩罚",
+                "item_name": "病娇",
+                "checker": flag_checker("landmine_girl"),
+            },
+            {
+                "id": "victim_auto_ntr",
+                "label": "苦主",
+                "desc": "苦主：别人牛你必定成功，且每次失去老婆会额外获得1次「换老婆」次数，同时无法拒绝交换",
+                "item_name": "苦主",
+                "checker": any_flag_checker("victim_auto_ntr", "ban_reject_swap"),
+            },
+            {
+                "id": "next_ntr_guarantee",
+                "label": "黄毛",
+                "desc": "黄毛：下一次「牛老婆」必定成功，今日无法再使用「换老婆」",
+                "item_name": "黄毛",
+                "checker": flag_checker("next_ntr_guarantee"),
+            },
+            {
+                "id": "double_item_effect",
+                "label": "二度寝",
+                "desc": "二度寝：下次使用的道具卡数值效果翻倍",
+                "item_name": "二度寝",
+                "checker": flag_checker("double_item_effect"),
+            },
+            {
+                "id": "stick_hero",
+                "label": "棍勇",
+                "desc": "棍勇：获得额外的重置次数与特殊抽换老婆效果",
+                "item_name": "烧火棍",
+                "checker": flag_checker("stick_hero"),
+            },
+            {
+                "id": "light_fingers",
+                "label": "顺手的事",
+                "desc": "顺手的事：牛成功或在集市购物时，有50%概率顺手牵羊/被抓",
+                "item_name": "偷外卖",
+                "checker": flag_checker("light_fingers"),
+            },
+            {
+                "id": "rich_bro",
+                "label": "富哥",
+                "desc": "富哥：今日额外获得1次老婆集市购买机会，并随机让一位群友见者有份",
+                "item_name": "富哥",
+                "checker": flag_checker("rich_bro"),
+            },
+            {
+                "id": "share_bonus",
+                "label": "见者有份",
+                "desc": "见者有份：今日额外获得1次老婆集市购买机会",
+                "checker": flag_checker("share_bonus"),
+            },
+            {
+                "id": "learned",
+                "label": "长一智",
+                "desc": "长一智：当别人对你使用道具卡时你会获得对方使用的那张道具卡",
+                "item_name": "吃一堑",
+                "checker": flag_checker("learned"),
+            },
+            {
+                "id": "hand_scent",
+                "label": "手留余香",
+                "desc": "手留余香：你赠送道具时会随机获得一张新的道具卡",
+                "item_name": "赠人玫瑰",
+                "checker": flag_checker("hand_scent"),
+            },
+            {
+                "id": "blind_box_enthusiast",
+                "label": "盲盒爱好者",
+                "desc": "盲盒爱好者：今日每4小时可免费抽一次盲盒，每1小时仅能使用一个道具",
+                "item_name": "囤囤鼠",
+                "checker": flag_checker("blind_box_enthusiast"),
+            },
+            {
+                "id": "exhibitionist",
+                "label": "露出癖",
+                "desc": "露出癖：今日使用任何指令和道具都会额外执行一次「查老婆」指令",
+                "item_name": "露出癖",
+                "checker": flag_checker("exhibitionist"),
+            },
+            {
+                "id": "hermes",
+                "label": "爱马仕",
+                "desc": "爱马仕：抽老婆或换老婆只会抽到包含「赛马娘」的角色",
+                "item_name": "爱马仕",
+                "checker": flag_checker("hermes"),
+            },
+            {
+                "id": "lucky_e",
+                "label": "幸运E",
+                "desc": "幸运E：所有概率减半但不会低于20%",
+                "item_name": "枪兵",
+                "checker": flag_checker("lucky_e"),
+            },
+            {
+                "id": "shura",
+                "label": "修罗",
+                "desc": "修罗：仅能通过「牛老婆」获得新老婆，最多拥有6位且不再触发修罗场",
+                "item_name": "修罗",
+                "checker": flag_checker("shura"),
+            },
+            {
+                "id": "pachinko_777",
+                "label": "777",
+                "desc": "777：今日抽盲盒必定触发一次暴击，并获得额外抽盲盒机会",
+                "checker": flag_checker("pachinko_777"),
+            },
+            {
+                "id": "competition_target",
+                "label": "雄竞",
+                "desc": "雄竞：今日抽老婆有概率抽到与目标相同的老婆",
+                "item_name": "雄竞",
+                "checker": meta_exists_checker("competition_target"),
+            },
+            {
+                "id": "seduce_unlimited",
+                "label": "熊出没",
+                "desc": "熊出没：今日可无限次使用「勾引」，但每次有被禁言的风险",
+                "item_name": "熊出没",
+                "checker": mod_equals_checker("seduce_uses", -1),
+            },
+            {
+                "id": "future_diary_target",
+                "label": "未来日记",
+                "desc": "未来日记：下次抽老婆或换老婆将指向特定角色",
+                "item_name": "未来日记",
+                "checker": meta_equals_checker("future_diary_target", "我妻由乃"),
+            },
+            {
+                "id": "lightbulb",
+                "label": "电灯泡",
+                "desc": "电灯泡：监听指定群的换/牛老婆动向获取额外次数，并禁止重置",
+                "item_name": "电灯泡",
+                "checker": flag_checker("lightbulb"),
+            },
+        ]
+        self.status_item_specs = {
+            spec["item_name"]: spec
+            for spec in self.status_effect_specs
+            if spec.get("item_name")
+        }
         # 状态效果道具（不可重复获得）
-        self.status_items = {
+        self.status_items = set(self.status_item_specs.keys())
+        # 柏青哥三状态随机池配置（道具名称, 是否已拥有检查器）
+        pachinko_state_order = [
             "牛魔王",
             "开后宫",
-            "贤者时间",
             "纯爱战士",
-            "雄竞",
             "苦主",
             "黄毛",
             "公交车",
             "病娇",
             "熊出没",
-            "龙王",
-            "烧火棍",
-            "未来日记",
+            "二度寝",
             "爱马仕",
             "囤囤鼠",
             "露出癖",
             "偷外卖",
             "富哥",
-        }
+            "吃一堑",
+            "电灯泡",
+            "枪兵",
+            "修罗",
+        ]
+        self.pachinko_state_specs = [
+            (item_name, self.status_item_specs[item_name]["checker"])
+            for item_name in pachinko_state_order
+            if item_name in self.status_item_specs
+        ]
         # 命令与处理函数映射
         self.commands = {
             "抽老婆": self.animewife,
@@ -757,6 +1016,11 @@ class WifePlugin(Star):
             "打老婆": self.beat_wife,
             "勾引": self.seduce,
             "重开": self.reset_basics,
+            "赠送": self.gift_item,
+            "索取": self.request_item,
+            "同意赠送": self.accept_gift,
+            "同意索取": self.accept_request,
+            "查看道具请求": self.view_item_requests,
         }
         self.admins = self.load_admins()
 
@@ -911,6 +1175,8 @@ class WifePlugin(Star):
         检查露出状态的修罗场触发
         返回: (是否触发, 老婆数量)
         """
+        if get_user_flag(today, uid, "shura"):
+            return False, get_wife_count(cfg, uid, today)
         is_exhibitionist = get_user_flag(today, uid, "exhibitionist")
         is_harem = get_user_flag(today, uid, "harem")
         if not is_exhibitionist or not is_harem:
@@ -932,7 +1198,7 @@ class WifePlugin(Star):
         nick = event.get_sender_name()
         today_items = item_data.setdefault(today, {})
         user_items = today_items.setdefault(uid, [])
-        steal = random.random() < 0.5
+        steal = self._probability_check(0.5, today, uid)
         if steal:
             target_items = today_items.get(target_uid, [])
             if target_items:
@@ -960,7 +1226,7 @@ class WifePlugin(Star):
         nick = event.get_sender_name()
         today_items = item_data.setdefault(today, {})
         user_items = today_items.setdefault(uid, [])
-        steal = random.random() < 0.5
+        steal = self._probability_check(0.5, today, uid)
         if steal:
             market_items = market.get("items", [])
             if market_items:
@@ -1104,7 +1370,7 @@ class WifePlugin(Star):
         while pending_batches > 0:
             pending_batches -= 1
             # 本批次决定抽取的道具数量
-            if random.random() < 0.2:
+            if self._probability_check(0.2, today, uid):
                 batch_count = 0
             else:
                 batch_count = random.randint(1, 4)
@@ -1132,7 +1398,7 @@ class WifePlugin(Star):
                 should_crit = True
                 pachinko_777_used = True
                 set_user_flag(today, uid, "pachinko_777", False)  # 使用后清除777效果
-            elif random.random() < 0.20:
+            elif self._probability_check(0.20, today, uid):
                 should_crit = True
             if should_crit:
                 pending_batches += 1
@@ -1171,6 +1437,9 @@ class WifePlugin(Star):
         arg = text[len("重置盲盒") :].strip()
         admin_ids = {str(a) for a in self.admins}
         today_items = item_data.setdefault(today, {})
+        if get_user_flag(today, uid, "lightbulb"):
+            yield event.plain_result(f"{nick}，电灯泡状态下无法使用「重置盲盒」指令哦~")
+            return
         # 自己重置
         if not arg:
             day_record = reset_blind_box_records.setdefault(today, {})
@@ -1251,6 +1520,224 @@ class WifePlugin(Star):
         items_text = "、".join(user_items)
         yield event.plain_result(f"{nick}，你当前拥有的道具卡：{items_text}")
 
+    async def gift_item(self, event: AstrMessageEvent):
+        today = get_today()
+        gid = str(event.message_obj.group_id)
+        uid = str(event.get_sender_id())
+        nick = event.get_sender_name()
+        if get_user_flag(today, uid, "ban_items"):
+            yield event.plain_result(f"{nick}，你处于贤者时间，无法使用「赠送」指令哦~")
+            return
+        target_uid = self.parse_at_target(event)
+        if not target_uid:
+            yield event.plain_result(f"{nick}，使用「赠送」时请@目标用户哦~")
+            return
+        target_uid = str(target_uid)
+        if target_uid == uid:
+            yield event.plain_result(f"{nick}，不能把道具送给自己哦~")
+            return
+        text = event.message_str.strip()
+        item_name = text[len("赠送"):].strip()
+        if "@" in item_name:
+            item_name = item_name.split("@", 1)[0].strip()
+        item_name = item_name.strip("【】「」『』\"'“” ")
+        if not item_name:
+            yield event.plain_result(f"{nick}，请写明要赠送的道具卡名称哦~")
+            return
+        today_items = item_data.setdefault(today, {})
+        user_items = today_items.get(uid, [])
+        if item_name not in user_items:
+            yield event.plain_result(f"{nick}，你的道具卡里没有「{item_name}」哦~")
+            return
+        entry = self._get_gift_group_entry(today, gid)
+        donations = entry.setdefault("donations", {})
+        target_bucket = donations.setdefault(target_uid, {})
+        target_bucket[uid] = {
+            "item": item_name,
+            "time": datetime.utcnow().timestamp(),
+        }
+        save_gift_requests()
+        cfg = load_group_config(gid)
+        target_info = cfg.get(target_uid, {})
+        target_nick = target_info.get("nick", f"用户{target_uid}") if isinstance(target_info, dict) else f"用户{target_uid}"
+        yield event.plain_result(
+            f"{nick}，已申请将「{item_name}」赠送给{target_nick}，请TA发送“同意赠送 @{nick}”确认领取。"
+        )
+
+    async def accept_gift(self, event: AstrMessageEvent):
+        today = get_today()
+        gid = str(event.message_obj.group_id)
+        receiver_uid = str(event.get_sender_id())
+        nick = event.get_sender_name()
+        if get_user_flag(today, receiver_uid, "ban_items"):
+            yield event.plain_result(f"{nick}，你目前无法使用道具指令，无法接受赠送哦~")
+            return
+        sender_uid = self.parse_at_target(event)
+        if not sender_uid:
+            yield event.plain_result(f"{nick}，请在“同意赠送”后@发起赠送的人哦~")
+            return
+        sender_uid = str(sender_uid)
+        entry = self._get_gift_group_entry(today, gid)
+        donations = entry.get("donations", {})
+        target_bucket = donations.get(receiver_uid, {})
+        record = target_bucket.get(sender_uid)
+        if not record:
+            yield event.plain_result(f"{nick}，当前没有来自该用户的赠送请求哦~")
+            return
+        item_name = record["item"]
+        today_items = item_data.setdefault(today, {})
+        sender_items = today_items.get(sender_uid, [])
+        if item_name not in sender_items:
+            del target_bucket[sender_uid]
+            if not target_bucket:
+                donations.pop(receiver_uid, None)
+            self._cleanup_gift_entry(today, gid)
+            yield event.plain_result(f"{nick}，对方已经没有「{item_name}」了，赠送请求失效啦~")
+            return
+        sender_items.remove(item_name)
+        receiver_items = today_items.setdefault(receiver_uid, [])
+        receiver_items.append(item_name)
+        cfg = load_group_config(gid)
+        sender_info = cfg.get(sender_uid, {})
+        sender_nick = sender_info.get("nick", f"用户{sender_uid}") if isinstance(sender_info, dict) else f"用户{sender_uid}"
+        bonus_msg = ""
+        if get_user_flag(today, sender_uid, "hand_scent") and self.item_pool:
+            reward_card = random.choice(self.item_pool)
+            sender_items.append(reward_card)
+            bonus_msg = f"\n（{sender_nick}的手留余香触发，获得「{reward_card}」）"
+        save_item_data()
+        del target_bucket[sender_uid]
+        if not target_bucket:
+            donations.pop(receiver_uid, None)
+        self._cleanup_gift_entry(today, gid)
+        yield event.plain_result(f"{nick}，已成功领取{sender_nick}赠送的「{item_name}」！{bonus_msg}")
+
+    async def request_item(self, event: AstrMessageEvent):
+        today = get_today()
+        gid = str(event.message_obj.group_id)
+        uid = str(event.get_sender_id())
+        nick = event.get_sender_name()
+        if get_user_flag(today, uid, "ban_items"):
+            yield event.plain_result(f"{nick}，你处于贤者时间，无法使用「索取」指令哦~")
+            return
+        target_uid = self.parse_at_target(event)
+        if not target_uid:
+            yield event.plain_result(f"{nick}，使用「索取」时请@目标用户哦~")
+            return
+        target_uid = str(target_uid)
+        if target_uid == uid:
+            yield event.plain_result(f"{nick}，不能向自己索取道具哦~")
+            return
+        text = event.message_str.strip()
+        item_name = text[len("索取"):].strip()
+        if "@" in item_name:
+            item_name = item_name.split("@", 1)[0].strip()
+        item_name = item_name.strip("【】「」『』\"'“” ")
+        if not item_name:
+            yield event.plain_result(f"{nick}，请写明要索取的道具卡名称哦~")
+            return
+        today_items = item_data.setdefault(today, {})
+        target_items = today_items.get(target_uid, [])
+        if item_name not in target_items:
+            yield event.plain_result(f"{nick}，对方当前没有「{item_name}」，无法索取哦~")
+            return
+        entry = self._get_gift_group_entry(today, gid)
+        demands = entry.setdefault("demands", {})
+        sender_bucket = demands.setdefault(target_uid, {})
+        sender_bucket[uid] = {
+            "item": item_name,
+            "time": datetime.utcnow().timestamp(),
+        }
+        save_gift_requests()
+        cfg = load_group_config(gid)
+        target_info = cfg.get(target_uid, {})
+        target_nick = target_info.get("nick", f"用户{target_uid}") if isinstance(target_info, dict) else f"用户{target_uid}"
+        yield event.plain_result(
+            f"{nick}，已向{target_nick}发起索取「{item_name}」的请求，请TA发送“同意索取 @{nick}”确认。"
+        )
+
+    async def accept_request(self, event: AstrMessageEvent):
+        today = get_today()
+        gid = str(event.message_obj.group_id)
+        giver_uid = str(event.get_sender_id())
+        nick = event.get_sender_name()
+        if get_user_flag(today, giver_uid, "ban_items"):
+            yield event.plain_result(f"{nick}，你处于贤者时间，无法执行「同意索取」哦~")
+            return
+        requester_uid = self.parse_at_target(event)
+        if not requester_uid:
+            yield event.plain_result(f"{nick}，请在“同意索取”后@请求道具的用户哦~")
+            return
+        requester_uid = str(requester_uid)
+        entry = self._get_gift_group_entry(today, gid)
+        demands = entry.get("demands", {})
+        giver_bucket = demands.get(giver_uid, {})
+        record = giver_bucket.get(requester_uid)
+        if not record:
+            yield event.plain_result(f"{nick}，没有来自该用户的索取请求哦~")
+            return
+        item_name = record["item"]
+        today_items = item_data.setdefault(today, {})
+        giver_items = today_items.get(giver_uid, [])
+        if item_name not in giver_items:
+            del giver_bucket[requester_uid]
+            if not giver_bucket:
+                demands.pop(giver_uid, None)
+            self._cleanup_gift_entry(today, gid)
+            yield event.plain_result(f"{nick}，你已经没有「{item_name}」了，此次索取请求自动失效~")
+            return
+        giver_items.remove(item_name)
+        requester_items = today_items.setdefault(requester_uid, [])
+        requester_items.append(item_name)
+        bonus_msg = ""
+        if get_user_flag(today, giver_uid, "hand_scent") and self.item_pool:
+            reward_card = random.choice(self.item_pool)
+            giver_items.append(reward_card)
+            bonus_msg = f"\n（手留余香触发，你额外获得「{reward_card}」）"
+        save_item_data()
+        del giver_bucket[requester_uid]
+        if not giver_bucket:
+            demands.pop(giver_uid, None)
+        self._cleanup_gift_entry(today, gid)
+        cfg = load_group_config(gid)
+        requester_info = cfg.get(requester_uid, {})
+        requester_nick = requester_info.get("nick", f"用户{requester_uid}") if isinstance(requester_info, dict) else f"用户{requester_uid}"
+        yield event.plain_result(f"{nick}，已同意索取请求，「{item_name}」已交给{requester_nick}。{bonus_msg}")
+
+    async def view_item_requests(self, event: AstrMessageEvent):
+        today = get_today()
+        gid = str(event.message_obj.group_id)
+        uid = str(event.get_sender_id())
+        nick = event.get_sender_name()
+        cleanup_gift_requests()
+        day_entry = gift_requests.get(today, {})
+        group_entry = day_entry.get(gid, {})
+        donations = group_entry.get("donations", {})
+        demands = group_entry.get("demands", {})
+        cfg = load_group_config(gid)
+        lines = []
+        incoming = donations.get(uid, {})
+        if incoming:
+            lines.append("【待你确认的赠送】")
+            for sender_uid, info in incoming.items():
+                item_name = info.get("item", "未知道具")
+                sender_info = cfg.get(sender_uid, {})
+                sender_nick = sender_info.get("nick", f"用户{sender_uid}") if isinstance(sender_info, dict) else f"用户{sender_uid}"
+                lines.append(f"- {sender_nick} 赠送 「{item_name}」")
+        outgoing = demands.get(uid, {})
+        if outgoing:
+            lines.append("【待你确认的索取】")
+            for requester_uid, info in outgoing.items():
+                item_name = info.get("item", "未知道具")
+                requester_info = cfg.get(requester_uid, {})
+                requester_nick = requester_info.get("nick", f"用户{requester_uid}") if isinstance(requester_info, dict) else f"用户{requester_uid}"
+                lines.append(f"- {requester_nick} 索取 「{item_name}」")
+        if not lines:
+            yield event.plain_result(f"{nick}，目前没有待你处理的道具赠送或索取请求。")
+            return
+        lines.insert(0, f"{nick}，当前待你处理的道具请求如下：")
+        yield event.plain_result("\n".join(lines))
+
     async def view_status(self, event: AstrMessageEvent):
         today = get_today()
         uid = str(event.get_sender_id())
@@ -1292,53 +1779,41 @@ class WifePlugin(Star):
         
         # 收集状态数据（flags相关效果，显示完整说明）
         status_data = []
-        if get_user_flag(today, uid, "protect_from_ntr"):
-            status_data.append("纯爱战士：今日老婆不会被牛走和更换，也无法使用「换老婆」")
-        if get_user_flag(today, uid, "ban_change"):
-            status_data.append("换老婆禁用：今日无法使用「换老婆」指令")
-        if get_user_flag(today, uid, "ban_items"):
-            status_data.append("贤者时间：今日不受任何道具卡影响，同时也无法使用任何道具卡")
-        if get_user_flag(today, uid, "harem"):
-            status_data.append("开后宫：今日可以拥有多个老婆，但无法使用「换老婆」与「重置」指令")
-        if get_user_flag(today, uid, "ban_ntr"):
-            status_data.append("公交车：今日无法使用「牛老婆」，但可以强制交换老婆")
-        if get_user_flag(today, uid, "ntr_override"):
-            status_data.append("牛魔王：牛老婆和成功率提升并无视禁用效果，从其他渠道获得的牛老婆次数翻倍")
-        if get_user_flag(today, uid, "force_swap"):
-            status_data.append("强制交换：使用「交换老婆」指令时无需对方同意")
-        if get_user_flag(today, uid, "landmine_girl"):
-            status_data.append("病娇：你的老婆不会被牛走，但成功牛别人时可能遭遇惩罚")
-        if get_user_flag(today, uid, "ban_reject_swap"):
-            status_data.append("苦主：无法拒绝交换，请谨慎应对")
-        if get_user_flag(today, uid, "victim_auto_ntr"):
-            status_data.append("苦主（受害）：别人对你使用「牛老婆」必定成功，且每次失去老婆会额外获得1次「换老婆」次数")
-        if get_user_flag(today, uid, "next_ntr_guarantee"):
-            status_data.append("黄毛：下一次「牛老婆」必定成功")
-        if get_user_flag(today, uid, "double_item_effect"):
-            status_data.append("二度寝：下次使用的道具卡数值效果翻倍")
-        if get_user_flag(today, uid, "stick_hero"):
-            reset_extra_val = int(get_user_mod(today, uid, "reset_extra_uses", 0))
-            reset_blind_box_extra_val = int(get_user_mod(today, uid, "reset_blind_box_extra", 0))
-            status_data.append(f"棍勇：额外获得{reset_extra_val}次重置次数和{reset_blind_box_extra_val}次重置盲盒机会，抽老婆和换老婆有特殊效果")
-        if get_user_flag(today, uid, "hermes"):
-            status_data.append("爱马仕：抽老婆或换老婆只会抽到「赛马娘」")
-        if get_user_flag(today, uid, "pachinko_777"):
-            status_data.append("777：今日抽盲盒必定触发一次暴击")
-        if get_user_flag(today, uid, "light_fingers"):
-            status_data.append("顺手的事：牛成功或在集市购物时，50%顺手牵羊一张道具卡，50%被抓失去自己的道具卡")
-        if get_user_flag(today, uid, "rich_bro"):
-            status_data.append("富哥：今日额外获得1次老婆集市购买机会，并随机让一位群友见者有份")
-        if get_user_flag(today, uid, "share_bonus"):
-            status_data.append("见者有份：今日额外获得1次老婆集市购买机会")
-        if get_user_flag(today, uid, "learned"):
-            status_data.append("长一智：当其他人对你使用道具卡时你将获得对你使用的那张道具卡")
-        comp_target = get_user_meta(today, uid, "competition_target", None)
-        if comp_target:
-            comp_uid = str(comp_target)
-            comp_record = get_group_record(comp_uid, gid) or {}
-            comp_entry = wives_data.get(comp_uid, {}) if isinstance(wives_data, dict) else {}
-            comp_name = comp_record.get("nick") or comp_entry.get("nick")
-            status_data.append(f"雄竞：正在与{comp_name or f'用户{comp_uid}'}竞争同款老婆")
+        eff_snapshot = get_user_effects(today, uid)
+        if not isinstance(eff_snapshot, dict):
+            eff_snapshot = {"flags": {}, "mods": {}, "meta": {}}
+        eff_snapshot.setdefault("flags", {})
+        eff_snapshot.setdefault("mods", {})
+        eff_snapshot.setdefault("meta", {})
+        for spec in self.status_effect_specs:
+            checker = spec.get("checker")
+            active = False
+            if checker:
+                try:
+                    active = bool(checker(eff_snapshot))
+                except:
+                    active = False
+            if not active:
+                continue
+            desc = spec["desc"]
+            # todo 合并
+            if spec["id"] == "stick_hero":
+                reset_extra_val = int(get_user_mod(today, uid, "reset_extra_uses", 0))
+                reset_blind_box_extra_val = int(get_user_mod(today, uid, "reset_blind_box_extra", 0))
+                desc = f"棍勇：额外获得{reset_extra_val}次重置次数和{reset_blind_box_extra_val}次重置盲盒机会，抽老婆和换老婆有特殊效果"
+            elif spec["id"] == "lightbulb":
+                lamp_group = get_user_meta(today, uid, "lightbulb_group", None)
+                lamp_text = lamp_group or "指定"
+                desc = f"电灯泡：监听群{lamp_text}的换/牛老婆动向获取额外次数，无法使用各类重置指令"
+            elif spec["id"] == "competition_target":
+                comp_target = get_user_meta(today, uid, "competition_target", None)
+                if comp_target:
+                    comp_uid = str(comp_target)
+                    comp_record = get_group_record(comp_uid, gid) or {}
+                    comp_entry = wives_data.get(comp_uid, {}) if isinstance(wives_data, dict) else {}
+                    comp_name = comp_record.get("nick") or comp_entry.get("nick")
+                    desc = f"雄竞：正在与{comp_name or f'用户{comp_uid}'}竞争同款老婆"
+            status_data.append(desc)
         
         # 如果没有数据，返回文字提示
         if not panel_data and not status_data:
@@ -1740,7 +2215,17 @@ class WifePlugin(Star):
                 set_user_meta(today, uid, "last_item_use_time", now)
         yield event.plain_result(message or f"{nick}，道具卡「{card_name}」已处理。")
 
-    async def apply_item_effect(self, card_name, event, target_uid, extra_arg="", caller_uid=None):
+    async def apply_item_effect(
+        self,
+        card_name,
+        event,
+        target_uid,
+        extra_arg="",
+        caller_uid=None,
+        *,
+        use_double_effect: bool = True,
+        consume_double_effect: bool = True,
+    ):
         # 分步实现各道具效果
         # caller_uid: 可选，如果提供则使用该uid作为使用者（用于会员制餐厅等道具）
         today = get_today()
@@ -1757,11 +2242,21 @@ class WifePlugin(Star):
         cfg = load_group_config(gid)
         name = card_name
         is_sleep_effect = name == "二度寝"
-        double_active = bool(get_user_flag(today, uid, "double_item_effect")) if not is_sleep_effect else False
+        double_active = (
+            bool(get_user_flag(today, uid, "double_item_effect"))
+            if (use_double_effect and not is_sleep_effect)
+            else False
+        )
         double_factor = 2 if double_active else 1
 
         def finalize(success_flag: bool, message: str | None):
-            if not is_sleep_effect and double_active and success_flag:
+            if (
+                consume_double_effect
+                and use_double_effect
+                and not is_sleep_effect
+                and double_active
+                and success_flag
+            ):
                 set_user_flag(today, uid, "double_item_effect", False)
             return success_flag, message
         # 长一智被动效果：如果本次道具有明确目标，且目标拥有长一智，则目标在生效后获得同名道具卡
@@ -1801,7 +2296,7 @@ class WifePlugin(Star):
             if triggered:
                 # 触发修罗场后获得一次抽老婆（换老婆）机会
                 add_user_mod(today, uid, "change_extra_uses", 1)
-                return finalize(True, f"{nick}，你开启了后宫模式！但因为你处于露出状态，修罗场爆发！你失去了所有老婆......但获得了一次重新开始的机会。")
+                return finalize(True, f"{nick}，你开启了后宫模式！但因为你处于露出状态，修罗场爆发！你失去了所有老婆......但获得了一次抽老婆的机会。")
             result = f"{nick}，你开启了后宫模式！今日无法使用换老婆和重置指令，可同时拥有多个老婆，但小心修罗场哦~"
             return finalize(True, result)
         # ③ 贤者时间：清空当日前已生效效果，并禁止使用道具
@@ -1892,6 +2387,110 @@ class WifePlugin(Star):
             # 额外获得一次只能购买老婆的集市次数
             add_user_mod(today, uid, "market_wife_extra_purchases", 1 * double_factor)
             return finalize(True, f"{nick}，疯狂星期四来啦！你额外获得1次只能购买老婆的集市机会。")
+        if name == "赠人玫瑰":
+            set_user_flag(today, uid, "hand_scent", True)
+            return finalize(True, f"{nick}，赠人玫瑰，手留余香！你赠送道具时会随机获得新的道具卡。")
+        if name == "南北西":
+            keyword = "禁寄交流群!阿东"
+            local_imgs = []
+            try:
+                if os.path.exists(IMG_DIR):
+                    local_imgs = [
+                        f for f in os.listdir(IMG_DIR)
+                        if f.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp")) and keyword in f
+                    ]
+            except:
+                local_imgs = []
+            if not local_imgs:
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(self.image_base_url) as resp:
+                            text = await resp.text()
+                        all_imgs = text.splitlines()
+                        local_imgs = [img for img in all_imgs if keyword in img]
+                except:
+                    local_imgs = []
+            if not local_imgs:
+                return finalize(False, f"{nick}，未找到包含“{keyword}”的老婆素材，稍后再试吧~")
+            img = random.choice(local_imgs)
+            cfg = load_group_config(gid)
+            is_harem = get_user_flag(today, uid, "harem")
+            if not add_wife(cfg, uid, img, today, nick, is_harem):
+                return finalize(False, f"{nick}，修罗状态下只能通过「牛老婆」获得新老婆。")
+            save_group_config(cfg)
+            triggered, wife_count = self._check_exhibitionist_chaos(today, uid, gid, cfg)
+            if triggered:
+                add_user_mod(today, uid, "change_extra_uses", 1)
+                return finalize(True, f"{nick}，阿东降临！但你处于露出状态，修罗场爆发，获得一次抽老婆的机会。")
+            if img.startswith("http"):
+                display_name = self._resolve_avatar_nick(cfg, img)
+                text = f"{nick}，你得到了{display_name}，请好好珍惜哦~"
+            else:
+                name = os.path.splitext(img)[0]
+                if "!" in name:
+                    source, chara = name.split("!", 1)
+                    text = f"{nick}，你得到了来自《{source}》的{chara}，请好好珍惜哦~"
+                else:
+                    text = f"{nick}，你得到了{name}，请好好珍惜哦~"
+            return finalize(True, text)
+        if name == "城管":
+            if not self._ensure_market_available(today):
+                return finalize(False, f"{nick}，城管出动失败，今日集市暂无法刷新，请稍后再试~")
+            market = market_data[today]
+            current_wives = len(market.get("wives", []))
+            current_items = len(market.get("items", []))
+            market["wives"] = self._generate_market_wives(current_wives)
+            market["items"] = self._generate_market_items(current_items)
+            save_market_data()
+            return finalize(True, f"{nick}，城管出动！集市已重新整顿，刷新了{len(market['wives'])}位老婆与{len(market['items'])}件道具。")
+        if name == "仓管":
+            if not self._ensure_market_available(today):
+                return finalize(False, f"{nick}，仓管暂无法补货，今日集市未能刷新，请稍后再试~")
+            market = market_data[today]
+            added_wives = []
+            added_items = []
+            market_wives = market.setdefault("wives", [])
+            market_items = market.setdefault("items", [])
+            missing_wives = max(0, self.market_max_wives - len(market_wives))
+            if missing_wives > 0:
+                existing_names = {w.get("name") for w in market_wives}
+                existing_imgs = {w.get("img") for w in market_wives}
+                new_wives = self._generate_market_wives(missing_wives, existing_names, existing_imgs)
+                market_wives.extend(new_wives)
+                added_wives = new_wives
+            missing_items = max(0, self.market_max_items - len(market_items))
+            if missing_items > 0:
+                new_items = self._generate_market_items(missing_items, set(market_items))
+                market_items.extend(new_items)
+                added_items = new_items
+            save_market_data()
+            if not added_wives and not added_items:
+                return finalize(True, f"{nick}，仓管盘点完成，当前集市已经满员。")
+            return finalize(True, f"{nick}，仓管补货完成，新增{len(added_wives)}位老婆、{len(added_items)}件道具。")
+        if name == "电灯泡":
+            change_recs = change_records.setdefault(gid, {})
+            change_rec = change_recs.get(uid, {"date": today, "count": 0})
+            if change_rec.get("date") == today:
+                change_rec["count"] = 0
+                change_recs[uid] = change_rec
+                save_change_records()
+            ntr_recs = ntr_records.setdefault(gid, {})
+            ntr_rec = ntr_recs.get(uid, {"date": today, "count": 0})
+            if ntr_rec.get("date") == today:
+                ntr_rec["count"] = 0
+                ntr_recs[uid] = ntr_rec
+                save_ntr_records()
+            set_user_mod(today, uid, "change_extra_uses", 0)
+            set_user_mod(today, uid, "ntr_extra_uses", 0)
+            set_user_flag(today, uid, "lightbulb", True)
+            set_user_meta(today, uid, "lightbulb_group", gid)
+            return finalize(True, f"{nick}，电灯泡上线！你将实时掌控本群的换牛动向")
+        if name == "枪兵":
+            set_user_flag(today, uid, "lucky_e", True)
+            return finalize(True, f"{nick}，枪兵出击！但自古枪兵幸运E...")
+        if name == "修罗":
+            set_user_flag(today, uid, "shura", True)
+            return finalize(True, f"{nick}，你踏入修罗之路......")
         # ⑥ 雌堕：50%让@目标成为你的老婆（头像图），50%你成为对方的老婆（头像图）（贤者时间用户不受影响）
         if name == "雌堕":
             if not target_uid:
@@ -1904,9 +2503,10 @@ class WifePlugin(Star):
             if get_user_flag(today, uid, "ban_items"):
                 return False, f"{nick}，你处于贤者时间，无法使用道具。"
             # 成功分支：对方成为你的老婆
-            if random.random() < 0.5:
+            if self._probability_check(0.5, today, uid):
                 img = get_avatar_url(target_uid)
-                add_wife(cfg, uid, img, today, nick, False)
+                if not add_wife(cfg, uid, img, today, nick, False):
+                    return finalize(False, f"{nick}，修罗状态下只能通过「牛老婆」获得新老婆。")
                 save_group_config(cfg)
                 cancel_msg = await self.cancel_swap_on_wife_change(gid, [uid, target_uid])
                 msg = f"{nick}，雌堕成功！对方成为你的老婆了。"
@@ -1922,7 +2522,8 @@ class WifePlugin(Star):
                     target_nick = event.get_sender_name() if str(event.get_sender_id()) == target_uid else None
                 except:
                     target_nick = None
-                add_wife(cfg, target_uid, img, today, target_nick or f"用户{target_uid}", False)
+                if not add_wife(cfg, target_uid, img, today, target_nick or f"用户{target_uid}", False):
+                    return finalize(False, f"{nick}，对方处于修罗状态，只能通过「牛老婆」获得新老婆。")
                 save_group_config(cfg)
                 cancel_msg = await self.cancel_swap_on_wife_change(gid, [uid, target_uid])
                 msg = f"{nick}，雌堕反噬......你成为了对方的老婆。"
@@ -1952,8 +2553,10 @@ class WifePlugin(Star):
             self._handle_wife_loss(today, target_uid, target_loss, gid)
             target_avatar = get_avatar_url(target_uid)
             user_avatar = get_avatar_url(uid)
-            add_wife(cfg, uid, target_avatar, today, nick, False)
-            add_wife(cfg, target_uid, user_avatar, today, target_nick, False)
+            if not add_wife(cfg, uid, target_avatar, today, nick, False):
+                return finalize(False, f"{nick}，修罗状态下只能通过「牛老婆」获得新老婆。")
+            if not add_wife(cfg, target_uid, user_avatar, today, target_nick, False):
+                return finalize(False, f"{nick}，{target_nick}处于修罗状态，无法获得新的老婆。")
             save_group_config(cfg)
             cancel_msg = await self.cancel_swap_on_wife_change(gid, [uid, target_uid])
             msg = f"{nick}，真是一对苦命鸳鸯......你与{target_nick}失去了所有老婆，并互相成为了对方的老婆。你可有何话说？"
@@ -2036,33 +2639,25 @@ class WifePlugin(Star):
             return finalize(True, f"{nick}，你清空了自己的道具卡，通过「复读」复制到了{target_nick}当前的全部道具：{'、'.join(target_items)}。")
         # ⑩ 何意味：随机执行一个效果（增加新效果）
         if name == "何意味":
-            choice = random.choice([
+            two_effect_candidates = [
                 "mute_300",
                 "double_counter",
                 "zero_counter",
                 "change_free_half",
                 "change_fail_half",
-                "impart",
-                "do_change_once",
-                "two_effects",
-                "random_item",
-                "draw_chance",
-                "two_items",
-                "ban_items",
-                "lose_all_items",
-                "force_use_item",
-            ])
-            # 被禁言300秒
-            if choice == "mute_300":
+            ]
+
+            async def effect_mute_300():
+                duration = 300 * double_factor
                 try:
-                    duration = 300 * double_factor
                     await event.bot.set_group_ban(group_id=int(gid), user_id=int(uid), duration=int(duration))
                 except:
                     pass
-                return finalize(True, f"{nick}，何意味？你被禁言{duration}秒......")
-            # 使今天“换老婆”/“牛老婆”随机一个指令的使用次数翻倍
-            if choice == "double_counter":
-                if random.random() < 0.5:
+                msg = f"{nick}，何意味？你被禁言{duration}秒......"
+                return True, msg, f"被禁言{duration}秒"
+
+            async def effect_double_counter():
+                if self._probability_check(0.5, today, uid):
                     grp = change_records.setdefault(gid, {})
                     rec = grp.get(uid, {"date": today, "count": 0})
                     if rec.get("date") != today:
@@ -2070,23 +2665,24 @@ class WifePlugin(Star):
                     rec["count"] *= (2 * double_factor)
                     grp[uid] = rec
                     save_change_records()
-                    return finalize(True, f"{nick}，何意味？你今天的“换老婆”使用次数翻倍。")
+                    msg = f"{nick}，何意味？你今天的“换老婆”使用次数翻倍。"
+                    return True, msg, "换老婆次数翻倍"
                 else:
                     grp = ntr_records.setdefault(gid, {})
                     rec = grp.get(uid, {"date": today, "count": 0})
                     if rec.get("date") != today:
                         rec = {"date": today, "count": 0}
                     multiplier = 2 * double_factor
-                    # 牛魔王效果：本次翻倍倍数再翻倍
                     if get_user_flag(today, uid, "ntr_override"):
                         multiplier = multiplier * 2
                     rec["count"] *= multiplier
                     grp[uid] = rec
                     save_ntr_records()
-                    return finalize(True, f"{nick}，何意味？你今天的「牛老婆」使用次数翻倍。")
-            # 使今天“换老婆”/“牛老婆”随机一个指令的使用次数变为0
-            if choice == "zero_counter":
-                if random.random() < 0.5:
+                    msg = f"{nick}，何意味？你今天的「牛老婆」使用次数翻倍。"
+                    return True, msg, "牛老婆次数翻倍"
+
+            async def effect_zero_counter():
+                if self._probability_check(0.5, today, uid):
                     grp = change_records.setdefault(gid, {})
                     rec = grp.get(uid, {"date": today, "count": 0})
                     if rec.get("date") != today:
@@ -2094,7 +2690,8 @@ class WifePlugin(Star):
                     rec["count"] = 0
                     grp[uid] = rec
                     save_change_records()
-                    return finalize(True, f"{nick}，何意味？你今天的“换老婆”使用次数清零。")
+                    msg = f"{nick}，何意味？你今天的“换老婆”使用次数清零。"
+                    return True, msg, "换老婆次数清零"
                 else:
                     grp = ntr_records.setdefault(gid, {})
                     rec = grp.get(uid, {"date": today, "count": 0})
@@ -2103,127 +2700,90 @@ class WifePlugin(Star):
                     rec["count"] = 0
                     grp[uid] = rec
                     save_ntr_records()
-                    return finalize(True, f"{nick}，何意味？你今天的“牛老婆”使用次数清零。")
-            # 今天“换老婆”有50%概率不消耗指令使用次数
-            if choice == "change_free_half":
+                    msg = f"{nick}，何意味？你今天的“牛老婆”使用次数清零。"
+                    return True, msg, "牛老婆次数清零"
+
+            async def effect_change_free_half():
                 current = clamp_probability(get_user_mod(today, uid, "change_free_prob", 0.0) or 0.0)
                 set_user_mod(today, uid, "change_free_prob", clamp_probability(max(current, 0.5 * double_factor)))
-                return finalize(True, f"{nick}，何意味？你今天“换老婆”有概率不消耗次数。")
-            # 今天“换老婆”有50%概率执行失败
-            if choice == "change_fail_half":
+                msg = f"{nick}，何意味？你今天“换老婆”有概率不消耗次数。"
+                return True, msg, "换老婆有概率不消耗次数"
+
+            async def effect_change_fail_half():
                 current = clamp_probability(get_user_mod(today, uid, "change_fail_prob", 0.0) or 0.0)
                 set_user_mod(today, uid, "change_fail_prob", clamp_probability(max(current, 0.5 * double_factor)))
-                return finalize(True, f"{nick}，何意味？你今天“换老婆”有概率执行失败。")
-            # 将今天所有拥有老婆的用户的老婆重新随机分配（贤者时间用户不受影响）
-            if choice == "impart":
+                msg = f"{nick}，何意味？你今天“换老婆”有概率执行失败。"
+                return True, msg, "换老婆有概率执行失败"
+
+            async def effect_impart():
                 success, message = await self._redistribute_wives(gid, today, event, cfg)
-                return finalize(success, message)
-            # 执行“换老婆”指令（本次不消耗次数）
-            if choice == "do_change_once":
+                return success, message, message
+
+            async def effect_do_change_once():
                 prev = float(get_user_mod(today, uid, "change_free_prob", 0.0) or 0.0)
                 set_user_mod(today, uid, "change_free_prob", clamp_probability(1.0))
-                # 执行一次换老婆
                 async for _ in self.change_wife(event):
                     pass
-                # 恢复之前概率（若之前大于1.0会被限制到1.0）
                 set_user_mod(today, uid, "change_free_prob", prev)
-                return finalize(True, f"{nick}，何意味？你的老婆跑了......")
-            # 随机生效两个效果
-            if choice == "two_effects":
-                effects = ["mute_300", "double_counter", "zero_counter", "change_free_half", "change_fail_half"]
-                selected = random.sample(effects, min(2, len(effects)))
-                msgs = []
-                for eff in selected:
-                    if eff == "mute_300":
-                        try:
-                            duration = 300 * double_factor
-                            await event.bot.set_group_ban(group_id=int(gid), user_id=int(uid), duration=duration)
-                        except:
-                            pass
-                        msgs.append(f"被禁言{duration}秒")
-                    elif eff == "double_counter":
-                        if random.random() < 0.5:
-                            grp = change_records.setdefault(gid, {})
-                            rec = grp.get(uid, {"date": today, "count": 0})
-                            if rec.get("date") != today:
-                                rec = {"date": today, "count": 0}
-                            rec["count"] *= (2 * double_factor)
-                            grp[uid] = rec
-                            save_change_records()
-                            msgs.append("换老婆次数翻倍")
-                        else:
-                            grp = ntr_records.setdefault(gid, {})
-                            rec = grp.get(uid, {"date": today, "count": 0})
-                            if rec.get("date") != today:
-                                rec = {"date": today, "count": 0}
-                            rec["count"] *= (2 * double_factor)
-                            grp[uid] = rec
-                            save_ntr_records()
-                            msgs.append("牛老婆次数翻倍")
-                    elif eff == "zero_counter":
-                        if random.random() < 0.5:
-                            grp = change_records.setdefault(gid, {})
-                            rec = grp.get(uid, {"date": today, "count": 0})
-                            if rec.get("date") != today:
-                                rec = {"date": today, "count": 0}
-                            rec["count"] = 0
-                            grp[uid] = rec
-                            save_change_records()
-                            msgs.append("换老婆次数清零")
-                        else:
-                            grp = ntr_records.setdefault(gid, {})
-                            rec = grp.get(uid, {"date": today, "count": 0})
-                            if rec.get("date") != today:
-                                rec = {"date": today, "count": 0}
-                            rec["count"] = 0
-                            grp[uid] = rec
-                            save_ntr_records()
-                            msgs.append("牛老婆次数清零")
-                    elif eff == "change_free_half":
-                        current = clamp_probability(get_user_mod(today, uid, "change_free_prob", 0.0) or 0.0)
-                        set_user_mod(today, uid, "change_free_prob", clamp_probability(max(current, 0.5 * double_factor)))
-                        msgs.append("换老婆有概率不消耗次数")
-                    elif eff == "change_fail_half":
-                        current = float(get_user_mod(today, uid, "change_fail_prob", 0.0) or 0.0)
-                        set_user_mod(today, uid, "change_fail_prob", max(current, min(1.0, 0.5 * double_factor)))
-                        msgs.append("换老婆有概率执行失败")
-                return finalize(True, f"{nick}，何意味？随机生效两个效果（{', '.join(msgs)}）。")
-            # 随机获得一张道具卡
-            if choice == "random_item":
+                msg = f"{nick}，何意味？你的老婆跑了......"
+                return True, msg, "强制执行一次换老婆"
+
+            async def effect_two_effects():
+                candidates = [c for c in two_effect_candidates if c in heyimi_effects]
+                if not candidates:
+                    return True, f"{nick}，何意味？随机效果失效了。", "随机两个效果（无效）"
+                selected = random.sample(candidates, min(2, len(candidates)))
+                summaries = []
+                for eff_key in selected:
+                    eff_success, _, eff_summary = await heyimi_effects[eff_key]()
+                    if eff_success:
+                        summaries.append(eff_summary or eff_key)
+                summary_text = "、".join(summaries) if summaries else "无效果"
+                msg = f"{nick}，何意味？随机生效两个效果（{summary_text}）。"
+                return True, msg, f"随机两个效果（{summary_text}）"
+
+            async def effect_random_item():
                 today_items = item_data.setdefault(today, {})
                 user_items = today_items.setdefault(uid, [])
                 drawn = random.choices(self.item_pool, k=double_factor)
                 user_items.extend(drawn)
                 save_item_data()
                 items_text = "、".join(drawn)
-                return finalize(True, f"{nick}，何意味？你获得了道具卡「{items_text}」。")
-            # 获得一次抽盲盒的机会
-            if choice == "draw_chance":
+                msg = f"{nick}，何意味？你获得了道具卡「{items_text}」。"
+                return True, msg, f"获得道具卡「{items_text}」"
+
+            async def effect_draw_chance():
                 add_user_mod(today, uid, "blind_box_extra_draw", double_factor)
-                return finalize(True, f"{nick}，何意味？你获得了{double_factor}次额外的抽盲盒机会。")
-            # 随机获得两张道具卡
-            if choice == "two_items":
+                msg = f"{nick}，何意味？你获得了{double_factor}次额外的抽盲盒机会。"
+                return True, msg, f"额外抽盲盒{double_factor}次"
+
+            async def effect_two_items():
                 today_items = item_data.setdefault(today, {})
                 user_items = today_items.setdefault(uid, [])
                 random_items = random.choices(self.item_pool, k=2 * double_factor)
                 user_items.extend(random_items)
                 save_item_data()
                 items_text = "、".join(random_items)
-                return finalize(True, f"{nick}，何意味？你获得了道具卡：{items_text}。")
-            # 今日不能再使用道具卡
-            if choice == "ban_items":
+                msg = f"{nick}，何意味？你获得了道具卡：{items_text}。"
+                return True, msg, f"获得道具卡：{items_text}"
+
+            async def effect_ban_items():
                 set_user_flag(today, uid, "ban_items", True)
-                return finalize(True, f"{nick}，何意味？你今天不能再使用道具卡了。")
-            # 失去你当前所有的道具卡
-            if choice == "lose_all_items":
+                msg = f"{nick}，何意味？你今天不能再使用道具卡了。"
+                return True, msg, "今日禁用道具卡"
+
+            async def effect_lose_all_items():
                 today_items = item_data.setdefault(today, {})
                 if uid in today_items:
                     lost_count = len(today_items[uid])
                     del today_items[uid]
                     save_item_data()
-                    return finalize(True, f"{nick}，何意味？你失去了所有道具卡（共{lost_count}张）。")
-                return finalize(True, f"{nick}，何意味？你失去了所有道具卡（你本来就没有）。")
-            if choice == "force_use_item":
+                    msg = f"{nick}，何意味？你失去了所有道具卡（共{lost_count}张）。"
+                else:
+                    msg = f"{nick}，何意味？你失去了所有道具卡（你本来就没有）。"
+                return True, msg, "失去所有道具卡"
+
+            async def effect_force_use_item():
                 today_items = item_data.setdefault(today, {})
                 user_items = today_items.get(uid, [])
                 available = [
@@ -2231,15 +2791,37 @@ class WifePlugin(Star):
                     if card not in self.items_need_target and card != "何意味"
                 ]
                 if not available:
-                    return finalize(True, f"{nick}，何意味？你没有可以强制使用的道具卡。")
+                    msg = f"{nick}，何意味？你没有可以强制使用的道具卡。"
+                    return True, msg, "没有可强制使用的道具"
                 forced_card = random.choice(available)
                 user_items.remove(forced_card)
                 save_item_data()
                 forced_success, forced_message = await self.apply_item_effect(forced_card, event, None)
                 msg_prefix = f"{nick}，何意味？强制使用了「{forced_card}」。"
                 if forced_success and forced_message:
-                    return finalize(True, f"{msg_prefix}\n{forced_message}")
-                return finalize(True, msg_prefix)
+                    return True, f"{msg_prefix}\n{forced_message}", f"强制使用「{forced_card}」"
+                return True, msg_prefix, f"强制使用「{forced_card}」"
+
+            heyimi_effects = {
+                "mute_300": effect_mute_300,
+                "double_counter": effect_double_counter,
+                "zero_counter": effect_zero_counter,
+                "change_free_half": effect_change_free_half,
+                "change_fail_half": effect_change_fail_half,
+                "impart": effect_impart,
+                "do_change_once": effect_do_change_once,
+                "two_effects": effect_two_effects,
+                "random_item": effect_random_item,
+                "draw_chance": effect_draw_chance,
+                "two_items": effect_two_items,
+                "ban_items": effect_ban_items,
+                "lose_all_items": effect_lose_all_items,
+                "force_use_item": effect_force_use_item,
+            }
+
+            effect_key = random.choice(list(heyimi_effects.keys()))
+            success, message, _ = await heyimi_effects[effect_key]()
+            return finalize(success, message)
         # 新增道具卡效果
         if name == "二度寝":
             set_user_flag(today, uid, "double_item_effect", True)
@@ -2296,7 +2878,7 @@ class WifePlugin(Star):
             if triggered:
                 # 触发修罗场后获得一次抽老婆（换老婆）机会
                 add_user_mod(today, uid, "change_extra_uses", 1)
-                return finalize(True, f"{nick}，龙王降临！你开启了后宫模式，但因为你处于露出状态，修罗场爆发！你失去了所有老婆......但获得了一次重新开始的机会。")
+                return finalize(True, f"{nick}，龙王降临！你开启了后宫模式，但因为你处于露出状态，修罗场爆发！你失去了所有老婆......但获得了一次抽老婆的机会。")
             return finalize(True, f"{nick}，龙王降临！你开启了后宫模式，并取回了所有被牛走的老婆。")
         if name == "鹿鹿时间到了":
             add_group_meta(today, gid, "change_extra_uses", 1 * double_factor)
@@ -2396,7 +2978,7 @@ class WifePlugin(Star):
             if triggered:
                 # 触发修罗场后获得一次抽老婆（换老婆）机会
                 add_user_mod(today, uid, "change_extra_uses", 1)
-                return finalize(True, f"{nick}，你获得了「露出」效果！但因为你处于露出状态，修罗场爆发！你失去了所有老婆......但获得了一次重新开始的机会。")
+                return finalize(True, f"{nick}，你获得了「露出」效果！但因为你处于露出状态，修罗场爆发！你失去了所有老婆......但获得了一次抽老婆的机会。")
             return finalize(True, f"{nick}，你获得了「露出」效果！今日使用任何指令和道具都会额外使用一次「查老婆」指令。")
         if name == "会员制餐厅":
             # 使用方法：使用会员制餐厅 XXX @目标
@@ -2508,98 +3090,38 @@ class WifePlugin(Star):
                 add_user_mod(today, uid, "blind_box_extra_draw", 2)
                 return finalize(True, f"{nick}，777！你获得2次额外抽盲盒次数，且今日抽盲盒必定触发一次暴击。")
             elif choice == "three_states":
-                # 随机获得三个状态（flags）效果（不能重复获得已有的状态）
-                # 注意：这里的“状态道具”需要和 status_items 中的新增状态保持同步
-                available_states = [
-                    "牛魔王", "开后宫", "纯爱战士", "苦主", "黄毛", "公交车", "病娇", "熊出没",
-                    "龙王", "二度寝", "爱马仕", "囤囤鼠", "露出癖", "偷外卖", "富哥", "吃一堑"
-                ]
                 eff = get_user_effects(today, uid)
-                current_flags = eff["flags"]
-                # 获取当前已有的状态道具
-                current_states = []
-                if current_flags.get("ntr_override"): current_states.append("牛魔王")
-                if current_flags.get("harem"): current_states.append("开后宫")
-                if current_flags.get("protect_from_ntr"): current_states.append("纯爱战士")
-                if current_flags.get("victim_auto_ntr") or current_flags.get("ban_reject_swap"): current_states.append("苦主")
-                if current_flags.get("next_ntr_guarantee"): current_states.append("黄毛")
-                if current_flags.get("ban_ntr") or current_flags.get("force_swap"): current_states.append("公交车")
-                if current_flags.get("landmine_girl"): current_states.append("病娇")
-                if current_flags.get("seduce_uses") == -1: current_states.append("熊出没")
-                # 这里需要检查龙王状态，但龙王需要特殊条件，暂时跳过
-                if current_flags.get("double_item_effect"): current_states.append("二度寝")
-                if current_flags.get("hermes"): current_states.append("爱马仕")
-                if current_flags.get("blind_box_enthusiast"): current_states.append("囤囤鼠")
-                if current_flags.get("exhibitionist"): current_states.append("露出癖")
-                if current_flags.get("light_fingers"): current_states.append("偷外卖")
-                if current_flags.get("rich_bro"): current_states.append("富哥")
-                if current_flags.get("learned"): current_states.append("吃一堑")
-                # 过滤掉已有的状态
-                available_states = [s for s in available_states if s not in current_states]
-                if len(available_states) < 3:
-                    available_states = available_states * 3  # 如果不够3个，允许重复
-                selected = random.sample(available_states, min(3, len(available_states)))
-                # 应用选中的状态
+                state_pool = []
+                for state_name, checker in self.pachinko_state_specs:
+                    has_state = False
+                    try:
+                        has_state = bool(checker(eff))
+                    except:
+                        has_state = False
+                    if not has_state:
+                        state_pool.append(state_name)
+                if not state_pool:
+                    state_pool = [state_name for state_name, _ in self.pachinko_state_specs]
+                if not state_pool:
+                    return finalize(False, f"{nick}，暂无可用的状态效果，柏青哥罢工了。")
+                while len(state_pool) < 3:
+                    state_pool.extend(state_pool)
+                selected = random.sample(state_pool, min(3, len(state_pool)))
+                applied_states = []
                 for state in selected:
-                    if state == "牛魔王":
-                        atk_now = float(get_user_mod(today, uid, "ntr_attack_bonus", 0.0))
-                        def_now = float(get_user_mod(today, uid, "ntr_defense_bonus", 0.0))
-                        set_user_mod(today, uid, "ntr_attack_bonus", max(atk_now, 0.3))
-                        set_user_mod(today, uid, "ntr_defense_bonus", max(def_now, 0.3))
-                        set_user_flag(today, uid, "ntr_override", True)
-                    elif state == "开后宫":
-                        set_user_flag(today, uid, "harem", True)
-                        set_user_flag(today, uid, "ban_change", True)
-                        # 检查露出状态：如果用户有露出状态，触发修罗场
-                        cfg = load_group_config(gid)
-                        triggered, wife_count = self._check_exhibitionist_chaos(today, uid, gid, cfg)
-                        if triggered:
-                            # 触发修罗场后获得一次抽老婆（换老婆）机会
-                            add_user_mod(today, uid, "change_extra_uses", 1)
-                    elif state == "纯爱战士":
-                        set_user_flag(today, uid, "protect_from_ntr", True)
-                        set_user_flag(today, uid, "ban_change", True)
-                    elif state == "苦主":
-                        set_user_flag(today, uid, "victim_auto_ntr", True)
-                        set_user_flag(today, uid, "ban_reject_swap", True)
-                    elif state == "黄毛":
-                        set_user_flag(today, uid, "next_ntr_guarantee", True)
-                        set_user_flag(today, uid, "ban_change", True)
-                    elif state == "公交车":
-                        set_user_flag(today, uid, "force_swap", True)
-                        set_user_flag(today, uid, "ban_ntr", True)
-                    elif state == "病娇":
-                        set_user_flag(today, uid, "landmine_girl", True)
-                    elif state == "熊出没":
-                        set_user_mod(today, uid, "seduce_uses", -1)
-                    elif state == "二度寝":
-                        set_user_flag(today, uid, "double_item_effect", True)
-                    elif state == "爱马仕":
-                        set_user_flag(today, uid, "hermes", True)
-                    elif state == "囤囤鼠":
-                        set_user_flag(today, uid, "blind_box_enthusiast", True)
-                    elif state == "露出癖":
-                        set_user_flag(today, uid, "exhibitionist", True)
-                        # 检查是否处于开后宫状态，如果是且拥有2个及以上老婆则触发修罗场
-                        cfg = load_group_config(gid)
-                        triggered, wife_count = self._check_exhibitionist_chaos(today, uid, gid, cfg)
-                        if triggered:
-                            # 触发修罗场后获得一次抽老婆（换老婆）机会
-                            add_user_mod(today, uid, "change_extra_uses", 1)
-                    elif state == "偷外卖":
-                        set_user_flag(today, uid, "light_fingers", True)
-                    elif state == "富哥":
-                        set_user_flag(today, uid, "rich_bro", True)
-                        # 富哥：本体多一次集市购买次数，并随机一人获得见者有份
-                        add_user_mod(today, uid, "market_extra_purchases", 1)
-                        others = [u for u in cfg.keys() if u != uid]
-                        if others:
-                            target_uid = random.choice(others)
-                            set_user_flag(today, target_uid, "share_bonus", True)
-                            add_user_mod(today, target_uid, "market_extra_purchases", 1)
-                    elif state == "吃一堑":
-                        set_user_flag(today, uid, "learned", True)
-                return finalize(True, f"{nick}，111！你随机获得了三个状态效果：{', '.join(selected)}。")
+                    success, _ = await self.apply_item_effect(
+                        state,
+                        event,
+                        None,
+                        caller_uid=uid,
+                        use_double_effect=False,
+                        consume_double_effect=False,
+                    )
+                    if success:
+                        applied_states.append(state)
+                if not applied_states:
+                    return finalize(False, f"{nick}，柏青哥抽取状态失败了，请稍后再试。")
+                return finalize(True, f"{nick}，111！你随机获得了三个状态效果：{', '.join(applied_states)}。")
             elif choice == "mute_300":
                 # 被禁言300秒
                 try:
@@ -2618,6 +3140,9 @@ class WifePlugin(Star):
         uid = str(event.get_sender_id())
         nick = event.get_sender_name()
         today = get_today()
+        if get_user_flag(today, uid, "shura"):
+            yield event.plain_result(f"{nick}，修罗状态下只能通过「牛老婆」获得新老婆。")
+            return
         cfg = load_group_config(gid)
         is_harem = get_user_flag(today, uid, "harem")
         # 检查是否今天已抽（普通用户）或是否达到次数限制（开后宫用户）
@@ -2651,7 +3176,7 @@ class WifePlugin(Star):
                 chaos_multiplier = float(get_user_meta(today, uid, "harem_chaos_multiplier", 1.0) or 1.0)
                 prob = 0.05 * (1.33 ** wife_count) * chaos_multiplier
                 prob = min(prob, 0.9)
-                if random.random() < prob:
+                if self._probability_check(prob, today, uid):
                     # 触发修罗场，失去所有老婆
                     if uid in cfg:
                         loss = wife_count
@@ -2660,7 +3185,7 @@ class WifePlugin(Star):
                         self._handle_wife_loss(today, uid, loss, gid)
                     # 触发修罗场后获得一次抽老婆（换老婆）机会
                     add_user_mod(today, uid, "change_extra_uses", 1)
-                    yield event.plain_result(f"{nick}，修罗场爆发！你失去了所有老婆......但获得了一次重新开始的机会。")
+                    yield event.plain_result(f"{nick}，修罗场爆发！你失去了所有老婆......但获得了一次抽老婆的机会。")
                     return
         else:
             # 普通用户：今天已抽则直接返回
@@ -2724,7 +3249,7 @@ class WifePlugin(Star):
         if comp_target:
             target_wives = get_wives_list(cfg, comp_target, today)
             competition_prob = clamp_probability(get_user_meta(today, uid, "competition_prob", 0.35) or 0.35)
-            if target_wives and random.random() < competition_prob:
+            if target_wives and self._probability_check(competition_prob, today, uid):
                 img = random.choice(target_wives)
                 # 抽到与目标相同的老婆后，退出雄竞状态
                 eff = get_user_effects(today, uid)
@@ -2735,7 +3260,7 @@ class WifePlugin(Star):
                 save_effects()
         # 检查棍勇状态：35%概率抽到关键词包含"回复术士的重启人生"的老婆
         stick_hero = get_user_flag(today, uid, "stick_hero")
-        if stick_hero and random.random() < 0.35:
+        if stick_hero and self._probability_check(0.35, today, uid):
             stick_hero_wives = get_user_meta(today, uid, "stick_hero_wives", [])
             if not isinstance(stick_hero_wives, list):
                 stick_hero_wives = []
@@ -2798,14 +3323,16 @@ class WifePlugin(Star):
                     del eff["meta"]["future_diary_target"]
                 save_effects()
         # 统一使用add_wife函数添加老婆
-        add_wife(cfg, uid, img, today, nick, is_harem)
+        if not add_wife(cfg, uid, img, today, nick, is_harem):
+            yield event.plain_result(f"{nick}，修罗状态下只能通过「牛老婆」获得新老婆。")
+            return
         save_group_config(cfg)
         # 检查露出状态：如果用户有露出状态且处于开后宫状态，当老婆数量达到2个及以上时触发修罗场
         triggered, wife_count = self._check_exhibitionist_chaos(today, uid, gid, cfg)
         if triggered:
             # 触发修罗场后获得一次抽老婆（换老婆）机会
             add_user_mod(today, uid, "change_extra_uses", 1)
-            yield event.plain_result(f"{nick}，你抽到了新老婆！但因为你处于露出状态，修罗场爆发！你失去了所有老婆......但获得了一次重新开始的机会。")
+            yield event.plain_result(f"{nick}，你抽到了新老婆！但因为你处于露出状态，修罗场爆发！你失去了所有老婆......但获得了一次抽老婆的机会。")
             return
         if is_harem:
             # 增加抽老婆次数（使用换老婆记录），但免费抽不消耗次数
@@ -2907,7 +3434,7 @@ class WifePlugin(Star):
             set_user_flag(today, uid, "next_ntr_guarantee", False)
         if get_user_flag(today, tid, "victim_auto_ntr"):
             forced_success = True
-        if forced_success or random.random() < final_prob:
+        if forced_success or self._probability_check(final_prob, today, uid):
             # 获取目标的老婆（支持开后宫用户）
             target_wives = get_wives_list(cfg, tid, today)
             if not target_wives:
@@ -2978,14 +3505,14 @@ class WifePlugin(Star):
                     pass
             # 给攻击者添加老婆
             is_attacker_harem = is_harem_user(cfg, uid)
-            add_wife(cfg, uid, wife, today, nick, is_attacker_harem)
+            add_wife(cfg, uid, wife, today, nick, is_attacker_harem, allow_shura=True)
             save_group_config(cfg)
             # 检查露出状态：如果用户有露出状态且处于开后宫状态，当老婆数量达到2个及以上时触发修罗场
             triggered, wife_count = self._check_exhibitionist_chaos(today, uid, gid, cfg)
             if triggered:
                 # 触发修罗场后获得一次抽老婆（换老婆）机会
                 add_user_mod(today, uid, "change_extra_uses", 1)
-                yield event.plain_result(f"{nick}，牛老婆成功！但因为你处于露出状态，修罗场爆发！你失去了所有老婆......但获得了一次重新开始的机会。")
+                yield event.plain_result(f"{nick}，牛老婆成功！但因为你处于露出状态，修罗场爆发！你失去了所有老婆......但获得了一次抽老婆的机会。")
                 return
             # 检查并取消相关交换请求
             cancel_msg = await self.cancel_swap_on_wife_change(gid, [uid, tid])
@@ -2994,9 +3521,11 @@ class WifePlugin(Star):
                 yield event.plain_result(cancel_msg)
             async for res in self._handle_light_fingers_on_ntr(today, uid, tid, event, cfg):
                 yield res
-            # 立即展示新老婆（免费抽，不消耗次数）
-            async for res in self.animewife(event, free_draw=True):
-                yield res
+            self._grant_lightbulb_bonus(today, gid, "ntr")
+            if not get_user_flag(today, uid, "shura"):
+                # 立即展示新老婆（免费抽，不消耗次数）
+                async for res in self.animewife(event, free_draw=True):
+                    yield res
         else:
             rem = max_ntr - rec["count"]
             yield event.plain_result(
@@ -3106,6 +3635,9 @@ class WifePlugin(Star):
         cfg = load_group_config(gid)
         recs = change_records.setdefault(gid, {})
         rec = recs.get(uid, {"date": "", "count": 0})
+        if get_user_flag(today, uid, "shura"):
+            yield event.plain_result(f"{nick}，修罗状态下只能通过「牛老婆」获得新老婆，无法使用「换老婆」。")
+            return
         # 禁止换老婆标记
         if get_user_flag(today, uid, "ban_change"):
             yield event.plain_result(f"{nick}，你今天无法使用“换老婆”哦~")
@@ -3136,7 +3668,7 @@ class WifePlugin(Star):
             del cfg[uid]
         self._handle_wife_loss(today, uid, lost_count, gid)
         fail_prob = float(get_user_mod(today, uid, "change_fail_prob", 0.0) or 0.0)
-        if fail_prob > 0 and random.random() < fail_prob:
+        if fail_prob > 0 and self._probability_check(fail_prob, today, uid):
             rec["count"] += 1
             recs[uid] = rec
             save_change_records()
@@ -3144,7 +3676,7 @@ class WifePlugin(Star):
             return
         consume = True
         free_prob = clamp_probability(get_user_mod(today, uid, "change_free_prob", 0.0) or 0.0)
-        if free_prob > 0 and random.random() < free_prob:
+        if free_prob > 0 and self._probability_check(free_prob, today, uid):
             consume = False
         free_msg = ""
         if not consume and free_prob > 0:
@@ -3163,6 +3695,8 @@ class WifePlugin(Star):
         # 立即展示新老婆
         async for res in self.animewife(event):
             yield res
+        if consume:
+            self._grant_lightbulb_bonus(today, gid, "change")
         if free_msg:
             yield event.plain_result(f"{nick}{free_msg}")
 
@@ -3172,6 +3706,9 @@ class WifePlugin(Star):
         uid = str(event.get_sender_id())
         nick = event.get_sender_name()
         today = get_today()
+        if get_user_flag(today, uid, "lightbulb"):
+            yield event.plain_result(f"{nick}，电灯泡状态下无法使用「重置牛」指令哦~")
+            return
         # 开后宫用户无法使用重置指令
         if get_user_flag(today, uid, "harem"):
             yield event.plain_result(f"{nick}，开后宫状态下无法使用“重置牛”指令哦~")
@@ -3204,7 +3741,7 @@ class WifePlugin(Star):
         grp[uid] = rec
         save_json(RESET_SHARED_FILE, reset_records)
         tid = self.parse_at_target(event) or uid
-        if random.random() < self.reset_success_rate:
+        if self._probability_check(self.reset_success_rate, today, uid):
             if gid in ntr_records and tid in ntr_records[gid]:
                 del ntr_records[gid][tid]
                 save_ntr_records()
@@ -3229,6 +3766,9 @@ class WifePlugin(Star):
         uid = str(event.get_sender_id())
         nick = event.get_sender_name()
         today = get_today()
+        if get_user_flag(today, uid, "lightbulb"):
+            yield event.plain_result(f"{nick}，电灯泡状态下无法使用「重置换」指令哦~")
+            return
         # 开后宫用户无法使用重置指令
         if get_user_flag(today, uid, "harem"):
             yield event.plain_result(f"{nick}，开后宫状态下无法使用“重置换”指令哦~")
@@ -3262,7 +3802,7 @@ class WifePlugin(Star):
         grp[uid] = rec
         save_json(RESET_SHARED_FILE, reset_records)
         tid = self.parse_at_target(event) or uid
-        if random.random() < self.reset_success_rate:
+        if self._probability_check(self.reset_success_rate, today, uid):
             grp2 = change_records.setdefault(gid, {})
             if tid in grp2:
                 del grp2[tid]
@@ -3291,6 +3831,9 @@ class WifePlugin(Star):
         tid = self.parse_at_target(event)
         nick = event.get_sender_name()
         today = get_today()
+        if get_user_flag(today, uid, "shura"):
+            yield event.plain_result(f"{nick}，修罗状态下只能通过「牛老婆」获得新老婆，无法使用「交换老婆」。")
+            return
         # 检查发起者是否拥有开后宫效果
         if get_user_flag(today, uid, "harem"):
             yield event.plain_result(f"{nick}，开后宫状态下无法使用「交换老婆」指令哦~")
@@ -3310,6 +3853,9 @@ class WifePlugin(Star):
             return
         if not tid or tid == uid:
             yield event.plain_result(f"{nick}，请在命令后@你想交换的对象哦~")
+            return
+        if get_user_flag(today, tid, "shura"):
+            yield event.plain_result(f"{nick}，对方处于修罗状态，只能通过「牛老婆」获得新老婆，无法参与交换。")
             return
         # 检查目标是否拥有开后宫效果
         if get_user_flag(today, tid, "harem"):
@@ -3371,6 +3917,9 @@ class WifePlugin(Star):
         uid = self.parse_at_target(event)
         nick = event.get_sender_name()
         today = get_today()
+        if get_user_flag(today, tid, "shura"):
+            yield event.plain_result(f"{nick}，修罗状态下只能通过「牛老婆」获得新老婆，无法使用「同意交换」。")
+            return
         # 检查同意者是否拥有开后宫效果
         if get_user_flag(today, tid, "harem"):
             yield event.plain_result(f"{nick}，开后宫状态下无法使用「同意交换」指令哦~")
@@ -3385,6 +3934,9 @@ class WifePlugin(Star):
             yield event.plain_result(
                 f"{nick}，请在命令后@发起者，或用「查看交换请求」命令查看当前请求哦~"
             )
+            return
+        if get_user_flag(today, uid, "shura"):
+            yield event.plain_result(f"{nick}，对方处于修罗状态，只能通过「牛老婆」获得新老婆，无法参与交换。")
             return
         # 检查发起者是否拥有开后宫效果（可能在发起后使用了开后宫道具）
         if get_user_flag(today, uid, "harem"):
@@ -3518,6 +4070,9 @@ class WifePlugin(Star):
         if uses <= 0:
             yield event.plain_result(f"{nick}，你今天还没有「选老婆」的使用次数，快去使用道具卡获得吧~")
             return
+        if get_user_flag(today, uid, "shura"):
+            yield event.plain_result(f"{nick}，修罗状态下只能通过「牛老婆」获得新老婆，无法使用「选老婆」。")
+            return
         # 解析关键词
         msg = event.message_str.strip()
         parts = msg.split(maxsplit=1)
@@ -3561,14 +4116,16 @@ class WifePlugin(Star):
         img = random.choice(filtered_imgs)
         # 检查是否开后宫
         is_harem = get_user_flag(today, uid, "harem")
-        add_wife(cfg, uid, img, today, nick, is_harem)
+        if not add_wife(cfg, uid, img, today, nick, is_harem):
+            yield event.plain_result(f"{nick}，修罗状态下只能通过「牛老婆」获得新老婆。")
+            return
         save_group_config(cfg)
         # 检查露出状态：如果用户有露出状态且处于开后宫状态，当老婆数量达到2个及以上时触发修罗场
         triggered, wife_count = self._check_exhibitionist_chaos(today, uid, gid, cfg)
         if triggered:
             # 触发修罗场后获得一次抽老婆（换老婆）机会
             add_user_mod(today, uid, "change_extra_uses", 1)
-            yield event.plain_result(f"{nick}，你选择了新老婆！但因为你处于露出状态，修罗场爆发！你失去了所有老婆......但获得了一次重新开始的机会。")
+            yield event.plain_result(f"{nick}，你选择了新老婆！但因为你处于露出状态，修罗场爆发！你失去了所有老婆......但获得了一次抽老婆的机会。")
             return
         # 解析出处和角色名
         name = os.path.splitext(img)[0]
@@ -3604,7 +4161,7 @@ class WifePlugin(Star):
         add_user_mod(today, uid, "beat_wife_uses", -1)
         has_landmine = get_user_flag(today, uid, "landmine_girl")
         # 30% 概率失去所有老婆（病娇效果免疫）
-        if not has_landmine and random.random() < 0.3:
+        if not has_landmine and self._probability_check(0.3, today, uid):
             if uid in cfg:
                 del cfg[uid]
                 save_group_config(cfg)
@@ -3662,6 +4219,9 @@ class WifePlugin(Star):
         uid = str(event.get_sender_id())
         nick = event.get_sender_name()
         today = get_today()
+        if get_user_flag(today, uid, "shura"):
+            yield event.plain_result(f"{nick}，修罗状态下只能通过「牛老婆」获得新老婆，无法使用「勾引」。")
+            return
         # 检查使用次数（-1表示无限）
         uses = int(get_user_mod(today, uid, "seduce_uses", 0))
         if uses == 0:
@@ -3720,7 +4280,7 @@ class WifePlugin(Star):
             add_user_mod(today, uid, "seduce_uses", -1)
         # 熊出没效果：25%概率被禁言120秒
         if is_unlimited:
-            if random.random() < 0.25:
+            if self._probability_check(0.25, today, uid):
                 try:
                     await event.bot.set_group_ban(group_id=int(gid), user_id=int(uid), duration=120)
                 except:
@@ -3728,18 +4288,20 @@ class WifePlugin(Star):
                 yield event.plain_result(f"{nick}，勾引失败！你被禁言120秒......")
                 return
         # 30%概率成功
-        if random.random() < 0.3:
+        if self._probability_check(0.3, today, uid):
             cfg = load_group_config(gid)
             img = get_avatar_url(target_uid)
             is_harem = get_user_flag(today, uid, "harem")
-            add_wife(cfg, uid, img, today, nick, is_harem)
+            if not add_wife(cfg, uid, img, today, nick, is_harem):
+                yield event.plain_result(f"{nick}，修罗状态下只能通过「牛老婆」获得新老婆。")
+                return
             save_group_config(cfg)
             # 检查露出状态：如果用户有露出状态且处于开后宫状态，当老婆数量达到2个及以上时触发修罗场
             triggered, wife_count = self._check_exhibitionist_chaos(today, uid, gid, cfg)
             if triggered:
                 # 触发修罗场后获得一次抽老婆（换老婆）机会
                 add_user_mod(today, uid, "change_extra_uses", 1)
-                yield event.plain_result(f"{nick}，勾引成功！但因为你处于露出状态，修罗场爆发！你失去了所有老婆......但获得了一次重新开始的机会。")
+                yield event.plain_result(f"{nick}，勾引成功！但因为你处于露出状态，修罗场爆发！你失去了所有老婆......但获得了一次抽老婆的机会。")
                 return
             cancel_msg = await self.cancel_swap_on_wife_change(gid, [uid, target_uid])
             msg = f"{nick}，勾引成功！对方已经拜倒在你的脂包肌下了。"
@@ -3825,52 +4387,136 @@ class WifePlugin(Star):
         save_swap_limit_records()
         yield event.plain_result(f"{nick}，已清空{target_nick}今日的所有数据（效果、道具、老婆、记录等）")
 
-    def _refresh_market(self, today: str):
-        """刷新当日集市数据"""
-        # 获取所有老婆图片
+    def _load_image_pool(self):
         image_pool = []
         try:
             if os.path.exists(IMG_DIR):
-                image_pool = [f for f in os.listdir(IMG_DIR) if f.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp"))]
+                image_pool = [
+                    f
+                    for f in os.listdir(IMG_DIR)
+                    if f.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp"))
+                ]
         except:
             image_pool = []
-        
-        # 注意：网络获取图片列表需要在异步函数中完成，这里只处理本地图片
-        
-        if not image_pool:
-            return False
-        
-        # 随机选择10个老婆
-        selected_wives = random.sample(image_pool, min(10, len(image_pool)))
-        
-        # 随机选择10张道具卡
-        selected_items = random.sample(self.item_pool, min(10, len(self.item_pool)))
-        
-        # 处理重名老婆：添加序号标记
-        wife_names = {}
-        processed_wives = []
-        for wife_img in selected_wives:
+        return image_pool
+
+    def _ensure_unique_wife_name(self, base_name, used_names):
+        if base_name not in used_names:
+            used_names.add(base_name)
+            return base_name
+        idx = 1
+        while True:
+            candidate = f"{base_name}({idx})"
+            if candidate not in used_names:
+                used_names.add(candidate)
+                return candidate
+            idx += 1
+
+    def _generate_market_wives(self, count, existing_names=None, exclude_images=None):
+        if count <= 0:
+            return []
+        used_names = set(existing_names or [])
+        excluded = set(exclude_images or [])
+        image_pool = self._load_image_pool()
+        available = [img for img in image_pool if img not in excluded]
+        if not available:
+            available = list(image_pool)
+        if not available:
+            return []
+        if len(available) >= count:
+            selection = random.sample(available, count)
+        else:
+            selection = available[:]
+            while len(selection) < count and image_pool:
+                selection.append(random.choice(image_pool))
+        processed = []
+        for wife_img in selection:
             name = os.path.splitext(wife_img)[0]
             if "!" in name:
-                source, chara = name.split("!", 1)
-                display_name = chara
+                _, chara = name.split("!", 1)
+                base_name = chara
             else:
-                display_name = name
-            
-            if display_name in wife_names:
-                wife_names[display_name] += 1
-                display_name = f"{display_name}({wife_names[display_name]})"
-            else:
-                wife_names[display_name] = 0
-            
-            processed_wives.append({
-                "img": wife_img,
-                "name": display_name
-            })
+                base_name = name
+            display_name = self._ensure_unique_wife_name(base_name, used_names)
+            processed.append({"img": wife_img, "name": display_name})
+        return processed
+
+    def _generate_market_items(self, count, exclude_items=None):
+        if count <= 0:
+            return []
+        excluded = set(exclude_items or [])
+        available = [item for item in self.item_pool if item not in excluded]
+        if not available:
+            available = list(self.item_pool)
+        if not available:
+            return []
+        if len(available) >= count:
+            return random.sample(available, count)
+        selection = available[:]
+        while len(selection) < count and self.item_pool:
+            selection.append(random.choice(self.item_pool))
+        return selection
+
+    def _ensure_market_available(self, today: str) -> bool:
+        if today not in market_data or not market_data[today]:
+            return self._refresh_market(today)
+        return True
+    
+    def _get_gift_group_entry(self, today: str, gid: str):
+        cleanup_gift_requests()
+        day_entry = gift_requests.setdefault(today, {})
+        group_entry = day_entry.setdefault(gid, {"donations": {}, "demands": {}})
+        return group_entry
+    
+    def _cleanup_gift_entry(self, today: str, gid: str):
+        day_entry = gift_requests.get(today)
+        if not day_entry:
+            save_gift_requests()
+            return
+        group_entry = day_entry.get(gid)
+        if group_entry:
+            if not group_entry.get("donations") and not group_entry.get("demands"):
+                del day_entry[gid]
+        if not day_entry:
+            gift_requests.pop(today, None)
+        save_gift_requests()
+
+    def _grant_lightbulb_bonus(self, today: str, gid: str, action: str):
+        day_effects = effects_data.get(today, {})
+        if not day_effects:
+            return
+        bonus_key = "change_extra_uses" if action == "change" else "ntr_extra_uses"
+        for lamp_uid, eff in day_effects.items():
+            if lamp_uid == "__groups__":
+                continue
+            flags = eff.get("flags", {})
+            if not flags.get("lightbulb"):
+                continue
+            meta = eff.get("meta", {})
+            if meta.get("lightbulb_group") != gid:
+                continue
+            add_user_mod(today, lamp_uid, bonus_key, 1)
+
+    def _adjust_probability(self, prob: float, today: str, uid: str) -> float:
+        adjusted = clamp_probability(prob)
+        if get_user_flag(today, uid, "lucky_e"):
+            adjusted = max(0.2, adjusted * 0.5)
+        return clamp_probability(adjusted)
+
+    def _probability_check(self, prob: float, today: str, uid: str) -> bool:
+        adjusted = self._adjust_probability(prob, today, uid)
+        return random.random() < adjusted
+
+    def _refresh_market(self, today: str):
+        """刷新当日集市数据"""
+        selected_wives = self._generate_market_wives(self.market_max_wives)
+        if self.market_max_wives > 0 and not selected_wives:
+            return False
+        selected_items = self._generate_market_items(self.market_max_items)
         
         # 保存集市数据
         market_data[today] = {
-            "wives": processed_wives,
+            "wives": selected_wives,
             "items": selected_items
         }
         save_market_data()
@@ -3927,23 +4573,16 @@ class WifePlugin(Star):
         """生成集市图片"""
         width = 1200
         padding = 20
-        item_width = (width - padding * 2 - 20 * 9) // 10  # 10个物品，9个间隔
-        item_height = 150
-        wife_section_height = item_height + 40  # 图片高度 + 文字高度
-        item_section_height = 40  # 仅文字
-        gap = 20
-        
-        # 计算总高度
-        # 标题高度 + 老婆部分（标题+图片+文字）+ 间隔 + 道具卡部分（标题+文字）
-        title_height = 40
-        wife_title_height = 30
-        wife_text_height = 40
-        item_title_height = 30
-        total_height = padding + title_height + wife_title_height + item_height + wife_text_height + gap + item_title_height + item_section_height + padding
-        
-        # 创建图片
-        img = PILImage.new('RGB', (width, total_height), color=(255, 255, 255))
-        draw = ImageDraw.Draw(img)
+        slot_cols = 8
+        slot_gap = 20
+        slot_width = (width - padding * 2 - slot_gap * (slot_cols - 1)) // slot_cols
+        slot_height = max(180, int(slot_width * 1.25))
+        max_wife_display = slot_cols * 2
+        display_wives = wives[:max_wife_display]
+        display_items = items[:slot_cols]
+        wife_rows = (len(display_wives) + slot_cols - 1) // slot_cols if display_wives else 0
+        item_rows = (len(display_items) + slot_cols - 1) // slot_cols if display_items else 0
+        gap = 30
         
         # 尝试加载字体
         try:
@@ -3956,6 +4595,84 @@ class WifePlugin(Star):
             except:
                 title_font = ImageFont.load_default()
                 text_font = ImageFont.load_default()
+        wife_row_gap = 30
+        item_row_gap = 20
+
+        def _calc_line_height(font: ImageFont.ImageFont) -> int:
+            try:
+                bbox = font.getbbox("字")
+                return max(18, (bbox[3] - bbox[1]) + 4)
+            except:
+                try:
+                    size = font.getsize("字")
+                    return max(18, size[1] + 4)
+                except:
+                    return 20
+
+        line_height = _calc_line_height(text_font)
+        max_wife_lines = 2
+        max_item_lines = 2
+        wife_text_height = line_height * max_wife_lines
+        item_text_height = line_height * max_item_lines
+        wife_section_height = 0 if wife_rows == 0 else wife_rows * (slot_height + wife_text_height) + max(0, wife_rows - 1) * wife_row_gap
+        item_section_height = 0 if item_rows == 0 else item_rows * item_text_height + max(0, item_rows - 1) * item_row_gap
+        
+        # 计算总高度
+        title_height = 40
+        wife_title_height = 30
+        item_title_height = 30
+        total_height = (
+            padding
+            + title_height
+            + (wife_title_height + wife_section_height if wife_rows else 0)
+            + (gap if wife_rows and item_rows else 0)
+            + (item_title_height + item_section_height if item_rows else 0)
+            + padding
+        )
+        
+        # 创建图片
+        img = PILImage.new('RGB', (width, total_height), color=(255, 255, 255))
+        draw = ImageDraw.Draw(img)
+        
+        def _measure_text_width(text: str) -> int:
+            if not text:
+                return 0
+            try:
+                bbox = text_font.getbbox(text)
+                return bbox[2] - bbox[0]
+            except:
+                try:
+                        return text_font.getsize(text)[0]
+                except:
+                        return len(text) * 10
+
+        def _wrap_text(text: str, max_width: int, max_lines: int) -> list[str]:
+            if not text:
+                return [""]
+            lines: list[str] = []
+            idx = 0
+            length = len(text)
+            while idx < length and len(lines) < max_lines:
+                end = idx + 1
+                last_valid = idx
+                while end <= length:
+                    segment = text[idx:end]
+                    if _measure_text_width(segment) <= max_width:
+                        last_valid = end
+                        end += 1
+                        continue
+                    break
+                if last_valid == idx:
+                    last_valid = min(idx + 1, length)
+                lines.append(text[idx:last_valid])
+                idx = last_valid
+            if idx < length and lines:
+                ellipsis = "..."
+                truncated = lines[-1]
+                while truncated and _measure_text_width(truncated + ellipsis) > max_width:
+                    truncated = truncated[:-1]
+                lines[-1] = (truncated + ellipsis) if truncated else ellipsis
+            return lines or [text]
         
         # 绘制标题
         title_text = "老婆集市"
@@ -3964,51 +4681,48 @@ class WifePlugin(Star):
         draw.text(((width - title_width) // 2, padding), title_text, fill=(0, 0, 0), font=title_font)
         
         # 绘制老婆部分
-        wife_y = padding + 40
-        wife_title_y = wife_y
-        draw.text((padding, wife_title_y), "【老婆】", fill=(70, 130, 180), font=text_font)
-        wife_y += 30
-        
-        for i, wife in enumerate(wives[:10]):  # 最多显示10个
-            x = padding + i * (item_width + 20)
-            # 加载并绘制老婆图片
+        current_y = padding + 40
+        if wife_rows:
+            draw.text((padding, current_y), "【老婆】", fill=(70, 130, 180), font=text_font)
+            current_y += wife_title_height
+            for idx, wife in enumerate(display_wives):
+                row = idx // slot_cols
+                col = idx % slot_cols
+                x = padding + col * (slot_width + slot_gap)
+                y = current_y + row * (slot_height + wife_text_height + wife_row_gap)
             wife_img_path = os.path.join(IMG_DIR, wife["img"])
             try:
                 if os.path.exists(wife_img_path):
                     wife_img = PILImage.open(wife_img_path)
-                    wife_img = wife_img.resize((item_width, item_height), PILImage.Resampling.LANCZOS)
-                    img.paste(wife_img, (x, wife_y))
-                # 注意：网络图片加载需要在异步函数中完成，这里只处理本地图片
+                    wife_img = wife_img.resize((slot_width, slot_height), PILImage.Resampling.LANCZOS)
+                    img.paste(wife_img, (x, y))
             except:
                 pass
-            
-            # 绘制老婆名字
-            name = wife["name"]
-            name_bbox = draw.textbbox((0, 0), name, font=text_font)
-            name_width = name_bbox[2] - name_bbox[0]
-            if name_width > item_width:
-                # 名字太长，截断
-                name = name[:min(len(name), item_width // 8)] + "..."
-            draw.text((x + (item_width - name_width) // 2, wife_y + item_height + 5), name, fill=(50, 50, 50), font=text_font)
+                name_lines = _wrap_text(wife["name"], slot_width, max_wife_lines)
+                for line_idx, text_line in enumerate(name_lines):
+                    line_width = _measure_text_width(text_line)
+                    text_x = x + (slot_width - line_width) // 2
+                    text_y = y + slot_height + 5 + line_idx * line_height
+                    draw.text((text_x, text_y), text_line, fill=(50, 50, 50), font=text_font)
+            current_y += wife_section_height
         
         # 绘制道具卡部分
-        # 计算老婆部分的底部位置：图片顶部 + 图片高度 + 文字高度
-        wife_bottom = wife_y + item_height + 40
-        item_y = wife_bottom + gap
-        item_title_y = item_y
-        draw.text((padding, item_title_y), "【道具卡】", fill=(70, 130, 180), font=text_font)
-        item_y += 30
-        
-        for i, item in enumerate(items[:10]):  # 最多显示10个
-            x = padding + i * (item_width + 20)
-            # 绘制道具卡名称
-            item_bbox = draw.textbbox((0, 0), item, font=text_font)
-            item_width_text = item_bbox[2] - item_bbox[0]
-            if item_width_text > item_width:
-                item_display = item[:min(len(item), item_width // 8)] + "..."
-            else:
-                item_display = item
-            draw.text((x + (item_width - item_width_text) // 2, item_y), item_display, fill=(50, 50, 50), font=text_font)
+        if item_rows:
+            if wife_rows:
+                current_y += gap
+            draw.text((padding, current_y), "【道具卡】", fill=(70, 130, 180), font=text_font)
+            current_y += item_title_height
+            for idx, item in enumerate(display_items):
+                row = idx // slot_cols
+                col = idx % slot_cols
+                x = padding + col * (slot_width + slot_gap)
+                y = current_y + row * (item_text_height + item_row_gap)
+                item_lines = _wrap_text(item, slot_width, max_item_lines)
+                for line_idx, text_line in enumerate(item_lines):
+                    line_width = _measure_text_width(text_line)
+                    text_x = x + (slot_width - line_width) // 2
+                    text_y = y + line_idx * line_height
+                    draw.text((text_x, text_y), text_line, fill=(50, 50, 50), font=text_font)
         
         return img
 
@@ -4067,10 +4781,15 @@ class WifePlugin(Star):
         # 执行购买
         cfg = load_group_config(gid)
         if purchase_type == "wife":
+            if get_user_flag(today, uid, "shura"):
+                yield event.plain_result(f"{nick}，修罗状态下只能通过「牛老婆」获得新老婆，无法在集市购买老婆。")
+                return
             # 购买老婆
             wife_img = purchased["img"]
             is_harem = get_user_flag(today, uid, "harem")
-            add_wife(cfg, uid, wife_img, today, nick, is_harem)
+            if not add_wife(cfg, uid, wife_img, today, nick, is_harem):
+                yield event.plain_result(f"{nick}，修罗状态下只能通过「牛老婆」获得新老婆。")
+                return
             save_group_config(cfg)
             
             # 从集市下架该老婆
