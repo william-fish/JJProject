@@ -9,6 +9,7 @@ import aiohttp
 from astrbot.api.all import Image as AstrImage
 from PIL import Image as PILImage, ImageDraw, ImageFont
 import io
+import copy
 
 PLUGIN_DIR = StarTools.get_data_dir("astrbot_plugin_animewifex")
 CONFIG_DIR = os.path.join(PLUGIN_DIR, "config")
@@ -33,6 +34,7 @@ MARKET_PURCHASE_RECORDS_FILE = os.path.join(CONFIG_DIR, "market_purchase_records
 GIFT_REQUESTS_FILE = os.path.join(CONFIG_DIR, "gift_requests.json")
 BLIND_BOX_PERKS_FILE = os.path.join(CONFIG_DIR, "blind_box_perks.json")
 FORTUNE_FILE = os.path.join(CONFIG_DIR, "fortune.json")
+ARCHIVE_FILE = os.path.join(CONFIG_DIR, "archives.json")
 
 
 def get_today():
@@ -109,6 +111,18 @@ def cleanup_gift_requests():
         save_gift_requests()
 
 
+archives = {}
+
+
+def load_archives():
+    raw = load_json(ARCHIVE_FILE)
+    globals()["archives"] = raw.get("archives", {})
+
+
+def save_archives():
+    save_json(ARCHIVE_FILE, {"archives": archives})
+
+
 def load_change_records():
     raw = load_json(CHANGE_RECORDS_FILE)
     change_records.clear()
@@ -147,6 +161,7 @@ RESERVED_CONFIG_FILES = {
     os.path.basename(RESET_BLIND_BOX_RECORDS_FILE),
     os.path.basename(GLOBAL_WIFE_FILE),
     os.path.basename(GIFT_REQUESTS_FILE),
+    os.path.basename(ARCHIVE_FILE),
 }
 
 
@@ -668,13 +683,15 @@ FORTUNE_ADVICE = {
     },
 }
 
-def get_user_fortune(today: str, uid: str) -> dict:
-    """获取用户今日运势，如果不存在则生成"""
+def get_user_fortune(today: str, uid: str, *, force: bool = False, favor_good: bool = False) -> dict:
+    """获取用户今日运势，如果不存在（或强制刷新）则生成"""
     uid_str = str(uid)
     day_fortunes = fortune_data.setdefault(today, {})
+    if force and uid_str in day_fortunes:
+        del day_fortunes[uid_str]
     if uid_str not in day_fortunes:
         # 生成运势
-        fortune_type = _generate_fortune()
+        fortune_type = _generate_fortune(favor_good=favor_good)
         # 随机选择一张老婆图片
         image_pool = []
         try:
@@ -720,10 +737,27 @@ def get_user_fortune(today: str, uid: str) -> dict:
         save_fortune_data()
     return day_fortunes[uid_str]
 
-def _generate_fortune() -> str:
-    """根据权重随机生成运势类型"""
-    weights = [FORTUNE_TYPES[ft]["weight"] for ft in FORTUNE_TYPES.keys()]
-    return random.choices(list(FORTUNE_TYPES.keys()), weights=weights)[0]
+def _generate_fortune(*, favor_good: bool = False) -> str:
+    """根据权重随机生成运势类型，可选偏向更高运势"""
+    base_types = list(FORTUNE_TYPES.keys())
+    weights = []
+    bias = None
+    if favor_good:
+        bias = {
+            "大吉": 2.5,
+            "吉": 2.0,
+            "小吉": 1.3,
+            "中平": 0.8,
+            "小凶": 0.5,
+            "凶": 0.4,
+            "大凶": 0.3,
+        }
+    for ft in base_types:
+        weight = FORTUNE_TYPES[ft]["weight"]
+        if bias:
+            weight *= bias.get(ft, 1.0)
+        weights.append(weight)
+    return random.choices(base_types, weights=weights)[0]
 
 def get_blind_box_perk(uid: str, perk_type: str, default=0):
     """获取用户的盲盒永久加成"""
@@ -845,9 +879,77 @@ def get_user_flag(today: str, uid: str, flag_key: str) -> bool:
     return bool(get_user_effects(today, uid)["flags"].get(flag_key, False))
 
 
-def set_user_flag(today: str, uid: str, flag_key: str, value: bool):
-    get_user_effects(today, uid)["flags"][flag_key] = bool(value)
+def set_user_flag(today: str, uid: str, flag_key: str, value: bool, *, propagate: bool = True):
+    uid = str(uid)
+    eff = get_user_effects(today, uid)
+    flags = eff["flags"]
+    new_value = bool(value)
+    changed = flags.get(flag_key) != new_value
+    flags[flag_key] = new_value
     save_effects()
+    if propagate and changed:
+        _propagate_brother_flag(today, uid, flag_key, new_value)
+
+
+def _get_brother_partner(today: str, uid: str) -> str | None:
+    partner = get_user_meta(today, uid, "brother_partner")
+    if not partner:
+        return None
+    partner_str = str(partner)
+    return partner_str or None
+
+
+def _propagate_brother_flag(today: str, uid: str, flag_key: str, value: bool):
+    partner_uid = _get_brother_partner(today, uid)
+    if not partner_uid or partner_uid == uid:
+        return
+    partner_flags = get_user_effects(today, partner_uid)["flags"]
+    if partner_flags.get(flag_key) == bool(value):
+        return
+    set_user_flag(today, partner_uid, flag_key, value, propagate=False)
+
+
+def _sync_brother_statuses(today: str, uid_a: str, uid_b: str):
+    uid_a = str(uid_a)
+    uid_b = str(uid_b)
+    if uid_a == uid_b:
+        return
+    flags_a = get_user_effects(today, uid_a)["flags"]
+    flags_b = get_user_effects(today, uid_b)["flags"]
+    all_keys = set(flags_a.keys()) | set(flags_b.keys())
+    changed = False
+    for key in all_keys:
+        combined = bool(flags_a.get(key, False) or flags_b.get(key, False))
+        if flags_a.get(key, False) != combined:
+            flags_a[key] = combined
+            changed = True
+        if flags_b.get(key, False) != combined:
+            flags_b[key] = combined
+            changed = True
+    if changed:
+        save_effects()
+
+
+def _clear_brother_link(today: str, uid: str):
+    uid = str(uid)
+    eff = get_user_effects(today, uid)
+    meta = eff["meta"]
+    partner = meta.pop("brother_partner", None)
+    meta.pop("brother_label", None)
+    partner_uid = str(partner) if partner is not None else None
+    partner_changed = False
+    if partner_uid:
+        partner_eff = get_user_effects(today, partner_uid)
+        partner_meta = partner_eff["meta"]
+        if partner_meta.get("brother_partner") == uid:
+            partner_meta.pop("brother_partner", None)
+            partner_meta.pop("brother_label", None)
+            partner_changed = True
+    if partner is not None or partner_changed:
+        save_effects()
+    set_user_flag(today, uid, "brother_bond", False, propagate=False)
+    if partner_uid:
+        set_user_flag(today, partner_uid, "brother_bond", False, propagate=False)
 
 
 def get_user_mod(today: str, uid: str, mod_key: str, default=0):
@@ -913,6 +1015,7 @@ load_market_data()
 load_market_purchase_records()
 load_gift_requests()
 cleanup_gift_requests()
+load_archives()
 
 
 @register(
@@ -986,8 +1089,11 @@ class WifePlugin(Star):
             "55开",
             "洗牌",
             "塞翁失马",
+            "斗转星移",
+            "好兄弟",
+            "存档",
         ]
-        self.items_need_target = {"雌堕", "雄竞", "勾引", "牛道具", "偷拍", "复读", "会员制餐厅"}
+        self.items_need_target = {"雌堕", "雄竞", "勾引", "牛道具", "偷拍", "复读", "会员制餐厅", "好兄弟"}
         # 状态效果判定工具
         def flag_checker(flag_key: str):
             return lambda eff, key=flag_key: eff["flags"].get(key, False)
@@ -1161,6 +1267,15 @@ class WifePlugin(Star):
                 "checker": flag_checker("fortune_linked"),
             },
             {
+                "id": "brother_bond",
+                "label": "同甘共苦",
+                "desc": "同甘共苦：今日与你绑定的好兄弟将与你共享全部状态",
+                "desc_generator": lambda today, uid, gid: (
+                    f"与{get_user_meta(today, uid, 'brother_label') or '好兄弟'}同甘共苦：任意一方获得的新状态都会立即共享"
+                ),
+                "checker": flag_checker("brother_bond"),
+            },
+            {
                 "id": "lucky_e",
                 "label": "幸运E",
                 "desc": "幸运E：所有概率减半但不会低于20%",
@@ -1221,7 +1336,7 @@ class WifePlugin(Star):
             {
                 "id": "super_lucky",
                 "label": "超吉",
-                "desc": "超吉：你的老婆为今日吉星，则今日运势加成变为120%，不再会触发修罗场事件，且你的抽盲盒会必定触发幸运事件",
+                "desc": "超吉：若你的老婆为今日吉星，则今日运势加成变为120%，不再会触发修罗场事件，且你的抽盲盒必定触发幸运事件",
                 "item_name": "吉星如意",
                 "checker": flag_checker("super_lucky"),
             },
@@ -1404,6 +1519,49 @@ class WifePlugin(Star):
             history = []
         purchase_records[uid] = history
         return history
+
+    def _collect_user_archive_payload(self, today: str, uid: str) -> dict:
+        uid = str(uid)
+        payload = {}
+        day_effects = effects_data.get(today, {}).get(uid)
+        if day_effects is not None:
+            payload["effects"] = copy.deepcopy(day_effects)
+        record = wives_data.get(uid)
+        if record:
+            payload["wife_record"] = copy.deepcopy(record)
+        return payload
+
+    def _apply_user_archive_payload(self, today: str, uid: str, payload: dict):
+        uid = str(uid)
+        if "effects" in payload:
+            effects_data.setdefault(today, {})[uid] = copy.deepcopy(payload["effects"])
+            save_effects()
+        if "wife_record" in payload:
+            record = copy.deepcopy(payload["wife_record"])
+            record["date"] = today
+            record.setdefault("nick", record.get("nick", f"用户{uid}"))
+            record.setdefault("wives", record.get("wives", []))
+            record.setdefault("groups", record.get("groups", []))
+            wives_data[uid] = record
+            save_wife_data()
+
+    def _restore_archive_if_needed(self, today: str, uid: str) -> str | None:
+        uid = str(uid)
+        archive = archives.get(uid)
+        if not archive:
+            return None
+        saved_on = archive.get("saved_on")
+        data = archive.get("data")
+        if not data:
+            del archives[uid]
+            save_archives()
+            return None
+        if saved_on == today:
+            return None
+        self._apply_user_archive_payload(today, uid, data)
+        del archives[uid]
+        save_archives()
+        return f"已为你加载{saved_on}的存档，今日数据沿用当日状态。"
 
     def _consume_market_purchase_quota(self, today: str, uid: str, purchase_type: str, history_len: int) -> bool:
         base_limit = 1
@@ -1637,6 +1795,11 @@ class WifePlugin(Star):
         # 消息分发，根据命令调用对应方法
         if not hasattr(event.message_obj, "group_id"):
             return
+        today = get_today()
+        uid = str(event.get_sender_id())
+        restored_msg = self._restore_archive_if_needed(today, uid)
+        if restored_msg:
+            yield event.plain_result(restored_msg)
         text = event.message_str.strip()
         cmd_executed = False
         for cmd, func in self.commands.items():
@@ -2487,6 +2650,11 @@ class WifePlugin(Star):
                     "使用道具名 [@目标]：使用指定道具，部分道具需要@目标",
                     "老婆集市：查看今日老婆集市的商品列表",
                     "购买 名称：在老婆集市中购买指定老婆或道具卡",
+                    "赠送 道具名 @目标：向他人赠送当前持有的道具卡，等待对方确认",
+                    "同意赠送 @目标：接受指定用户的赠送请求，立即获得其道具",
+                    "索取 道具名 @目标：主动向别人索取指定道具，等待对方同意",
+                    "同意索取 @目标：同意他人的索取请求，将道具交给对方",
+                    "查看道具请求：查看当前待处理的赠送/索取请求列表",
                 ],
             ),
             (
@@ -3419,6 +3587,16 @@ class WifePlugin(Star):
             # 设置原批状态
             set_user_flag(today, uid, "yuanpi", True)
             return finalize(True, f"{nick}，原来你也......")
+        if name == "存档":
+            # 先确保今日效果已初始化，避免遗漏信息
+            get_user_effects(today, uid)
+            snapshot = self._collect_user_archive_payload(today, uid)
+            archives[uid] = {
+                "saved_on": today,
+                "data": snapshot,
+            }
+            save_archives()
+            return finalize(True, f"{nick}，存档完成！下次开启新的一天时会自动继承当前数据。")
         if name == "55开":
             # 设置众生平等状态
             set_user_flag(today, uid, "equal_rights", True)
@@ -3623,6 +3801,43 @@ class WifePlugin(Star):
         if name == "塞翁失马":
             set_user_flag(today, uid, "fortune_linked", True)
             return finalize(True, f"{nick}，塞翁失马焉知非福？")
+        if name == "好兄弟":
+            if not target_uid:
+                return finalize(False, f"{nick}，使用「好兄弟」时请@目标用户哦~")
+            target_uid = str(target_uid)
+            if target_uid == uid:
+                return finalize(False, f"{nick}，不能对自己使用「好兄弟」哦~")
+            target_info = cfg.get(target_uid, {})
+            target_nick = target_info.get("nick", f"用户{target_uid}") if isinstance(target_info, dict) else f"用户{target_uid}"
+            _clear_brother_link(today, uid)
+            _clear_brother_link(today, target_uid)
+            self_eff = get_user_effects(today, uid)
+            target_eff = get_user_effects(today, target_uid)
+            self_eff["meta"]["brother_partner"] = target_uid
+            self_eff["meta"]["brother_label"] = target_nick
+            target_eff["meta"]["brother_partner"] = uid
+            target_eff["meta"]["brother_label"] = nick
+            save_effects()
+            _sync_brother_statuses(today, uid, target_uid)
+            set_user_flag(today, uid, "brother_bond", True)
+            return finalize(True, f"{nick}，你与{target_nick}结为好兄弟！今日双方同甘共苦，获得的状态将实时共享。")
+        if name == "斗转星移":
+            new_fortune = get_user_fortune(today, uid, force=True, favor_good=True)
+            fortune_type = new_fortune.get("type", "未知")
+            stars = new_fortune.get("stars", "?")
+            lucky_star = new_fortune.get("lucky_star", "神秘人")
+            fortune_texts = []
+            fortune_texts.append(f"{nick}，斗转星移！你的今日运势被重新占卜为「{fortune_type}」（{stars}星），幸运吉星是「{lucky_star}」。")
+            # 复用今日运势指令输出
+            fortune = get_user_fortune(today, uid)
+            proverb = fortune.get("proverb", "……")
+            lucky = fortune.get("lucky_star", "神秘人")
+            dos = "、".join(fortune.get("dos", [])) or "暂无"
+            donts = "、".join(fortune.get("donts", [])) or "暂无"
+            fortune_texts.append(f"今日箴言：{proverb}")
+            fortune_texts.append(f"宜：{dos}")
+            fortune_texts.append(f"忌：{donts}")
+            return finalize(True, "\n".join(fortune_texts))
         # 其他未实现
         return finalize(False, f"道具卡「{card_name}」的效果正在开发中，敬请期待~")
 
