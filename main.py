@@ -2331,6 +2331,29 @@ class WifePlugin(Star):
         group_bonus = int(get_group_meta(today, gid, "change_extra_uses", 0))
         if group_bonus > 0:
             panel_data.append(f"群加成：+{group_bonus}次换老婆")
+        fortune = get_user_fortune(today, uid)
+        fortune_type = fortune.get("type", "未知")
+        stars = int(fortune.get("stars", 4))
+        star_diff = stars - 4
+        fortune_multiplier = 1.0 + star_diff * 0.05
+        percent = (fortune_multiplier - 1.0) * 100
+        if percent >= 0:
+            panel_data.append(f"今日运势：{fortune_type}（+{percent:.0f}% 概率加成）")
+        else:
+            panel_data.append(f"今日运势：{fortune_type}（{percent:.0f}% 概率加成）")
+        lucky_star = fortune.get("lucky_star")
+        if not lucky_star:
+            wife_img_name = fortune.get("wife_img")
+            if wife_img_name:
+                base = os.path.splitext(os.path.basename(wife_img_name))[0]
+                if "!" in base:
+                    _, chara = base.split("!", 1)
+                    lucky_star = chara
+                else:
+                    lucky_star = base
+        if not lucky_star:
+            lucky_star = "神秘人"
+        panel_data.append(f"今日吉星：{lucky_star}")
         
         # 收集状态数据（flags相关效果，显示完整说明）
         status_data = []
