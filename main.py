@@ -2031,7 +2031,9 @@ class WifePlugin(Star):
             "赠送": self.gift_item,
             "索取": self.request_item,
             "同意赠送": self.accept_gift,
+            "拒绝赠送": self.reject_gift,
             "同意索取": self.accept_request,
+            "拒绝索取": self.reject_request,
             "查看道具请求": self.view_item_requests,
             "今日运势": self.show_fortune,
         }
@@ -2188,6 +2190,7 @@ class WifePlugin(Star):
         if getattr(event, "_exhibitionist_extra_done", False):
             return
         today = get_today()
+        gid = str(event.message_obj.group_id)
         uid = str(event.get_sender_id())
         if not get_user_flag(today, uid, "exhibitionist"):
             return
@@ -3183,6 +3186,7 @@ class WifePlugin(Star):
     async def view_items(self, event: AstrMessageEvent):
         # 查看道具卡主逻辑
         today = get_today()
+        gid = str(event.message_obj.group_id)
         uid = str(event.get_sender_id())
         nick = event.get_sender_name()
         today_items = item_data.get(today, {})
@@ -3286,6 +3290,32 @@ class WifePlugin(Star):
         self._cleanup_gift_entry(today, gid)
         yield event.plain_result(f"已成功领取{sender_nick}赠送的「{item_name}」！{bonus_msg}")
 
+    async def reject_gift(self, event: AstrMessageEvent):
+        today = get_today()
+        gid = str(event.message_obj.group_id)
+        receiver_uid = str(event.get_sender_id())
+        sender_uid = self.parse_at_target(event)
+        if not sender_uid:
+            yield event.plain_result(f"请在“拒绝赠送”后@发起赠送的人哦~")
+            return
+        sender_uid = str(sender_uid)
+        entry = self._get_gift_group_entry(today, gid)
+        donations = entry.get("donations", {})
+        target_bucket = donations.get(receiver_uid, {})
+        record = target_bucket.get(sender_uid)
+        if not record:
+            yield event.plain_result(f"当前没有来自该用户的赠送请求哦~")
+            return
+        item_name = record.get("item", "未知道具")
+        del target_bucket[sender_uid]
+        if not target_bucket:
+            donations.pop(receiver_uid, None)
+        self._cleanup_gift_entry(today, gid)
+        cfg = load_group_config(gid)
+        sender_info = cfg.get(sender_uid, {})
+        sender_nick = sender_info.get("nick", f"用户{sender_uid}") if isinstance(sender_info, dict) else f"用户{sender_uid}"
+        yield event.plain_result(f"已拒绝{sender_nick}赠送的「{item_name}」，请求已撤销。")
+
     async def request_item(self, event: AstrMessageEvent):
         today = get_today()
         gid = str(event.message_obj.group_id)
@@ -3379,6 +3409,32 @@ class WifePlugin(Star):
         requester_nick = requester_info.get("nick", f"用户{requester_uid}") if isinstance(requester_info, dict) else f"用户{requester_uid}"
         yield event.plain_result(f"已同意索取请求，「{item_name}」已交给{requester_nick}。{bonus_msg}")
 
+    async def reject_request(self, event: AstrMessageEvent):
+        today = get_today()
+        gid = str(event.message_obj.group_id)
+        giver_uid = str(event.get_sender_id())
+        requester_uid = self.parse_at_target(event)
+        if not requester_uid:
+            yield event.plain_result(f"请在“拒绝索取”后@请求道具的用户哦~")
+            return
+        requester_uid = str(requester_uid)
+        entry = self._get_gift_group_entry(today, gid)
+        demands = entry.get("demands", {})
+        giver_bucket = demands.get(giver_uid, {})
+        record = giver_bucket.get(requester_uid)
+        if not record:
+            yield event.plain_result(f"没有来自该用户的索取请求哦~")
+            return
+        item_name = record.get("item", "未知道具")
+        del giver_bucket[requester_uid]
+        if not giver_bucket:
+            demands.pop(giver_uid, None)
+        self._cleanup_gift_entry(today, gid)
+        cfg = load_group_config(gid)
+        requester_info = cfg.get(requester_uid, {})
+        requester_nick = requester_info.get("nick", f"用户{requester_uid}") if isinstance(requester_info, dict) else f"用户{requester_uid}"
+        yield event.plain_result(f"已拒绝{requester_nick}索取「{item_name}」的请求，已帮你撤销。")
+
     async def view_item_requests(self, event: AstrMessageEvent):
         today = get_today()
         gid = str(event.message_obj.group_id)
@@ -3415,6 +3471,7 @@ class WifePlugin(Star):
 
     async def view_status(self, event: AstrMessageEvent):
         today = get_today()
+        gid = str(event.message_obj.group_id)
         uid = str(event.get_sender_id())
         nick = event.get_sender_name()
         gid = str(event.message_obj.group_id)
@@ -3844,8 +3901,10 @@ class WifePlugin(Star):
                     "购买 名称：在老婆集市中购买指定老婆或道具卡",
                     "赠送 道具名 @目标：向他人赠送当前持有的道具卡，等待对方确认",
                     "同意赠送 @目标：接受指定用户的赠送请求，立即获得其道具",
+                    "拒绝赠送 @目标：拒绝指定用户的赠送请求，撤销记录",
                     "索取 道具名 @目标：主动向别人索取指定道具，等待对方同意",
                     "同意索取 @目标：同意他人的索取请求，将道具交给对方",
+                    "拒绝索取 @目标：拒绝他人向你发起的索取请求，撤销记录",
                     "查看道具请求：查看当前待处理的赠送/索取请求列表",
                 ],
             ),
@@ -3895,6 +3954,7 @@ class WifePlugin(Star):
     async def use_item(self, event: AstrMessageEvent):
         # 使用道具卡主逻辑（效果待实现）
         today = get_today()
+        gid = str(event.message_obj.group_id)
         uid = str(event.get_sender_id())
         nick = event.get_sender_name()
         # 贤者时间：禁止使用任何道具
@@ -3964,11 +4024,23 @@ class WifePlugin(Star):
                     if get_user_flag(today, uid, "cheat"):
                         user_items.remove(card_name)
                         save_item_data()
+                        gift_cancelled, request_cancelled = self._cancel_item_transfer_requests(
+                            today, gid, uid, card_name
+                        )
+                        if gift_cancelled or request_cancelled:
+                            note = self._format_transfer_cancel_note(card_name, gift_cancelled, request_cancelled)
+                            message = f"{message}\n{note}" if message else note
             else:
                 # 其他道具正常移除
                 if card_name in user_items:
                     user_items.remove(card_name)
                     save_item_data()
+                    gift_cancelled, request_cancelled = self._cancel_item_transfer_requests(
+                        today, gid, uid, card_name
+                    )
+                    if gift_cancelled or request_cancelled:
+                        note = self._format_transfer_cancel_note(card_name, gift_cancelled, request_cancelled)
+                        message = f"{message}\n{note}" if message else note
                 bonus_card = self._maybe_trigger_magic_circuit(today, uid)
                 if bonus_card:
                     extra_msg = f"魔术回路发动！你获得了随机道具卡「{bonus_card}」。"
@@ -6871,6 +6943,45 @@ class WifePlugin(Star):
         if not day_entry:
             gift_requests.pop(today, None)
         save_gift_requests()
+
+    def _cancel_item_transfer_requests(self, today: str, gid: str, owner_uid: str, item_name: str) -> tuple[bool, bool]:
+        cancelled_donation = False
+        cancelled_demand = False
+        day_entry = gift_requests.get(today)
+        if not day_entry:
+            return cancelled_donation, cancelled_demand
+        group_entry = day_entry.get(gid)
+        if not group_entry:
+            return cancelled_donation, cancelled_demand
+        donations = group_entry.get("donations", {})
+        demands = group_entry.get("demands", {})
+        for target_uid, bucket in list(donations.items()):
+            record = bucket.get(owner_uid)
+            if record and record.get("item") == item_name:
+                del bucket[owner_uid]
+                cancelled_donation = True
+                if not bucket:
+                    donations.pop(target_uid, None)
+        giver_bucket = demands.get(owner_uid)
+        if giver_bucket:
+            to_remove = [req_uid for req_uid, info in giver_bucket.items() if info.get("item") == item_name]
+            for req_uid in to_remove:
+                del giver_bucket[req_uid]
+                cancelled_demand = True
+            if not giver_bucket:
+                demands.pop(owner_uid, None)
+        if cancelled_donation or cancelled_demand:
+            self._cleanup_gift_entry(today, gid)
+        return cancelled_donation, cancelled_demand
+
+    def _format_transfer_cancel_note(self, item_name: str, cancelled_donation: bool, cancelled_demand: bool) -> str:
+        parts = []
+        if cancelled_donation:
+            parts.append("赠送请求")
+        if cancelled_demand:
+            parts.append("索取请求")
+        target = "、".join(parts) if parts else "相关请求"
+        return f"由于你已使用「{item_name}」，相关的{target}已自动撤销。"
 
     def _grant_lightbulb_bonus(self, today: str, gid: str, action: str):
         day_effects = effects_data.get(today, {})
