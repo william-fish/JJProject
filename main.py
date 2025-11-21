@@ -2160,6 +2160,7 @@ class WifePlugin(Star):
             "赠送": self.gift_item,
             "索取": self.request_item,
             "同意赠送": self.accept_gift,
+            "拒绝赠送": self.reject_gift,
             "同意索取": self.accept_request,
             "拒绝赠送": self.reject_gift,
             "拒绝索取": self.reject_request,
@@ -3283,6 +3284,7 @@ class WifePlugin(Star):
     async def view_items(self, event: AstrMessageEvent):
         # 查看道具卡主逻辑
         today = get_today()
+        gid = str(event.message_obj.group_id)
         uid = str(event.get_sender_id())
         nick = event.get_sender_name()
         today_items = item_data.get(today, {})
@@ -3390,6 +3392,32 @@ class WifePlugin(Star):
             donations.pop(receiver_uid, None)
         self._cleanup_gift_entry(today, gid)
         yield event.plain_result(f"已成功领取{sender_nick}赠送的「{item_name}」！{bonus_msg}")
+
+    async def reject_gift(self, event: AstrMessageEvent):
+        today = get_today()
+        gid = str(event.message_obj.group_id)
+        receiver_uid = str(event.get_sender_id())
+        sender_uid = self.parse_at_target(event)
+        if not sender_uid:
+            yield event.plain_result(f"请在“拒绝赠送”后@发起赠送的人哦~")
+            return
+        sender_uid = str(sender_uid)
+        entry = self._get_gift_group_entry(today, gid)
+        donations = entry.get("donations", {})
+        target_bucket = donations.get(receiver_uid, {})
+        record = target_bucket.get(sender_uid)
+        if not record:
+            yield event.plain_result(f"当前没有来自该用户的赠送请求哦~")
+            return
+        item_name = record.get("item", "未知道具")
+        del target_bucket[sender_uid]
+        if not target_bucket:
+            donations.pop(receiver_uid, None)
+        self._cleanup_gift_entry(today, gid)
+        cfg = load_group_config(gid)
+        sender_info = cfg.get(sender_uid, {})
+        sender_nick = sender_info.get("nick", f"用户{sender_uid}") if isinstance(sender_info, dict) else f"用户{sender_uid}"
+        yield event.plain_result(f"已拒绝{sender_nick}赠送的「{item_name}」，请求已撤销。")
 
     async def request_item(self, event: AstrMessageEvent):
         today = get_today()
@@ -3579,6 +3607,7 @@ class WifePlugin(Star):
 
     async def view_status(self, event: AstrMessageEvent):
         today = get_today()
+        gid = str(event.message_obj.group_id)
         uid = str(event.get_sender_id())
         nick = event.get_sender_name()
         gid = str(event.message_obj.group_id)
@@ -4061,6 +4090,7 @@ class WifePlugin(Star):
     async def use_item(self, event: AstrMessageEvent):
         # 使用道具卡主逻辑（效果待实现）
         today = get_today()
+        gid = str(event.message_obj.group_id)
         uid = str(event.get_sender_id())
         nick = event.get_sender_name()
         # 贤者时间：禁止使用任何道具
