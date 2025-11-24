@@ -11,6 +11,7 @@ from PIL import Image as PILImage, ImageDraw, ImageFont
 import io
 import copy
 from collections import Counter
+import tempfile
 
 PLUGIN_DIR = StarTools.get_data_dir("astrbot_plugin_animewifex")
 CONFIG_DIR = os.path.join(PLUGIN_DIR, "config")
@@ -59,9 +60,23 @@ def load_json(path):
 
 
 def save_json(path, data):
-    # 保存数据到 JSON 文件
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
+    # 保存数据到 JSON 文件（原子写入，避免异常中断导致文件损坏）
+    dir_path = os.path.dirname(path)
+    if dir_path:
+        os.makedirs(dir_path, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(prefix="tmp_", suffix=".json", dir=dir_path or ".")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp:
+            json.dump(data, tmp, ensure_ascii=False, indent=4)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        os.replace(temp_path, path)
+    except Exception:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+        raise
 
 
 ntr_statuses = {}
@@ -639,7 +654,7 @@ class GroupConfigDict(dict):
     def __getitem__(self, uid):
         uid_str = str(uid)
         if uid_str not in self:
-            record = get_group_record(uid_str, self.group_id, attach=True)
+            record = get_group_record(uid_str, self.group_id, attach=False)
             if record:
                 dict.__setitem__(self, uid_str, record)
         return dict.__getitem__(self, uid_str)
@@ -647,7 +662,7 @@ class GroupConfigDict(dict):
     def get(self, uid, default=None):
         uid_str = str(uid)
         if uid_str not in self:
-            record = get_group_record(uid_str, self.group_id, attach=True)
+            record = get_group_record(uid_str, self.group_id, attach=False)
             if record:
                 dict.__setitem__(self, uid_str, record)
                 return record
@@ -2296,6 +2311,34 @@ class WifePlugin(Star):
                 valid_targets.append(tid)
         return valid_targets
 
+    def _pick_random_group_members(
+        self,
+        gid: str,
+        *,
+        count: int,
+        exclude: set[str] | None = None,
+        allow_zero_attention: bool = False,
+    ) -> list[str]:
+        """
+        从指定群内随机挑选若干成员ID。
+        - exclude: 需要排除的uid集合（字符串）
+        - allow_zero_attention: 是否允许挑选拥有0人问你状态的成员
+        """
+        today = get_today()
+        gid_str = str(gid)
+        exclude_ids = {str(e) for e in (exclude or set()) if e is not None}
+        candidates = []
+        for target_id, _, _ in iter_group_users(gid_str):
+            tid = str(target_id)
+            if tid in exclude_ids:
+                continue
+            if not allow_zero_attention and get_user_flag(today, tid, "zero_attention"):
+                continue
+            candidates.append(tid)
+        if len(candidates) < count or count <= 0:
+            return []
+        return random.sample(candidates, count)
+
     def parse_at_target(self, event, ignore_zero_attention: bool = False):
         # 解析@目标用户
         # ignore_zero_attention: 是否忽略"0人问你"状态（管理员指令使用）
@@ -3549,7 +3592,7 @@ class WifePlugin(Star):
             else:
                 yield event.plain_result(f"已为本群{affected}位成员重置盲盒次数，已保留他们现有的道具卡。")
             return
-        target_uid = self.parse_at_target(event, ignore_zero_attention=(uid in admin_ids))
+        target_uid = self.parse_at_target(event)
         if not target_uid:
             yield event.plain_result(f"请在“重置盲盒”后@需要重置的目标用户哦~")
             return
@@ -3607,7 +3650,7 @@ class WifePlugin(Star):
         if rec["count"] >= max_gift_uses:
             yield event.plain_result(f"你今天已经发起了{max_gift_uses}次赠送请求，明天再来吧~")
             return
-        target_uid = self.parse_at_target(event, ignore_zero_attention=True)
+        target_uid = self.parse_at_target(event)
         if not target_uid:
             yield event.plain_result(f"使用「赠送」时请@目标用户哦~")
             return
@@ -3636,6 +3679,33 @@ class WifePlugin(Star):
             # 众生平等：无视目标状态（使用者有众生平等 或 目标有众生平等）
             user_has_equal_rights = get_user_flag(today, uid, "equal_rights")
             target_has_equal_rights = get_user_flag(today, target_uid, "equal_rights")
+            forced_target_uid = None
+            forced_multi_targets = None
+            if item_name in self.items_need_target:
+                exclude_ids = {uid, target_uid}
+                if item_name == "月老":
+                    forced_multi_targets = self._pick_random_group_members(
+                        gid,
+                        count=2,
+                        exclude=exclude_ids,
+                    )
+                    if len(forced_multi_targets) < 2:
+                        yield event.plain_result(
+                            f"会员制餐厅赠送的「{item_name}」暂时无法生效：当前群可被随机撮合的群友不足两人。"
+                        )
+                        return
+                else:
+                    picks = self._pick_random_group_members(
+                        gid,
+                        count=1,
+                        exclude=exclude_ids,
+                    )
+                    if not picks:
+                        yield event.plain_result(
+                            f"会员制餐厅赠送的「{item_name}」需要随机指定群友，但当前群暂无可选对象，使用失败。"
+                        )
+                        return
+                    forced_target_uid = picks[0]
             if not user_has_equal_rights and not target_has_equal_rights:
                 # 检查目标是否处于贤者时间
                 if get_user_flag(today, target_uid, "ban_items"):
@@ -3654,7 +3724,14 @@ class WifePlugin(Star):
             target_info = cfg.get(target_uid, {})
             target_nick = target_info.get("nick", f"用户{target_uid}") if isinstance(target_info, dict) else f"用户{target_uid}"
             # 调用apply_item_effect，但使用target_uid作为caller_uid
-            success, effect_msg = await self.apply_item_effect(item_name, event, None, "", caller_uid=target_uid)
+            success, effect_msg = await self.apply_item_effect(
+                item_name,
+                event,
+                forced_target_uid,
+                "",
+                caller_uid=target_uid,
+                forced_targets=forced_multi_targets,
+            )
             # 增加赠送次数
             rec["count"] += 1
             gift_records[uid] = rec
@@ -4592,6 +4669,7 @@ class WifePlugin(Star):
         use_double_effect: bool = True,
         consume_double_effect: bool = True,
         skip_stacking_tower: bool = False,
+        forced_targets: list[str] | None = None,
     ):
         # 分步实现各道具效果
         # caller_uid: 可选，如果提供则使用该uid作为使用者（用于会员制餐厅等道具）
@@ -4880,8 +4958,21 @@ class WifePlugin(Star):
             set_user_meta(today, uid, "cuckold_group", gid)
             return await finalize(True, f"接盘侠上线！你将监听群{gid}的换老婆动向，别人换下的老婆都会被你接盘。")
         if name == "月老":
-            targets = self.parse_multi_targets(event, limit=2)
-            targets = [t for t in targets if t != uid]
+            targets: list[str]
+            if forced_targets:
+                targets = []
+                seen = set()
+                for forced in forced_targets:
+                    forced_str = str(forced)
+                    if forced_str == uid or forced_str in seen:
+                        continue
+                    seen.add(forced_str)
+                    targets.append(forced_str)
+                    if len(targets) >= 2:
+                        break
+            else:
+                targets = self.parse_multi_targets(event, limit=2)
+                targets = [t for t in targets if t != uid]
             if len(targets) < 2:
                 return await finalize(False, f"使用「月老」时请@两个不同的目标哦~")
             a_uid, b_uid = targets[0], targets[1]
@@ -7520,8 +7611,8 @@ class WifePlugin(Star):
         if uid not in self.admins:
             yield event.plain_result(f"仅管理员才能使用「重开」指令哦~")
             return
-        # 解析目标
-        target_uid = self.parse_at_target(event)
+        # 解析目标（管理员指令需无视0人问你状态）
+        target_uid = self.parse_at_target(event, ignore_zero_attention=True)
         if not target_uid:
             yield event.plain_result(f"请@你想清空数据的目标用户哦~")
             return
