@@ -2302,9 +2302,6 @@ class WifePlugin(Star):
         today = get_today()
         uid = str(event.get_sender_id())
         gid = str(event.message_obj.group_id)
-        # 如果是管理员，自动忽略"0人问你"状态
-        if uid in self.admins:
-            ignore_zero_attention = True
         original_target = None
         for comp in event.message_obj.message:
             if isinstance(comp, At):
@@ -2354,9 +2351,6 @@ class WifePlugin(Star):
         today = get_today()
         uid = str(event.get_sender_id())
         gid = str(event.message_obj.group_id)
-        # 如果是管理员，自动忽略"0人问你"状态
-        if uid in self.admins:
-            ignore_zero_attention = True
         original_targets = []
         for comp in event.message_obj.message:
             if isinstance(comp, At):
@@ -2493,6 +2487,14 @@ class WifePlugin(Star):
             _, chara = base.split("!", 1)
             return chara
         return base
+
+    def _get_wife_display_name(self, cfg: dict, img: str) -> str:
+        """
+        兼容旧逻辑的老婆展示名称接口。
+        目前所有场景都可以复用 _format_wife_name 的实现，单独提供一个包装方法
+        便于未来需要定制输出时统一调整。
+        """
+        return self._format_wife_name(cfg, img)
 
     async def _trigger_stacking_tower(self, today: str, uid: str, event: AstrMessageEvent, *, skip_recursion: bool = False) -> list:
         """叠叠乐效果：计算当前状态数，每3个状态额外获得1个随机状态"""
@@ -3547,7 +3549,7 @@ class WifePlugin(Star):
             else:
                 yield event.plain_result(f"已为本群{affected}位成员重置盲盒次数，已保留他们现有的道具卡。")
             return
-        target_uid = self.parse_at_target(event)
+        target_uid = self.parse_at_target(event, ignore_zero_attention=(uid in admin_ids))
         if not target_uid:
             yield event.plain_result(f"请在“重置盲盒”后@需要重置的目标用户哦~")
             return
@@ -3605,7 +3607,7 @@ class WifePlugin(Star):
         if rec["count"] >= max_gift_uses:
             yield event.plain_result(f"你今天已经发起了{max_gift_uses}次赠送请求，明天再来吧~")
             return
-        target_uid = self.parse_at_target(event)
+        target_uid = self.parse_at_target(event, ignore_zero_attention=True)
         if not target_uid:
             yield event.plain_result(f"使用「赠送」时请@目标用户哦~")
             return
@@ -6034,8 +6036,8 @@ class WifePlugin(Star):
             today_items[uid] = new_items
             save_item_data()
             items_text = "、".join(new_items)
-            cheat_msg = "出老千！" if has_cheat else ""
-            return await finalize(True, f"洗牌完成！你失去了所有道具卡，重新获得了{item_count}张道具卡：{items_text}。{cheat_msg}")
+            cheat_msg = "出老千！洗牌获得道具数量翻倍！" if has_cheat else ""
+            return await finalize(True, f"{cheat_msg}洗牌完成！你失去了所有道具卡，重新获得了{item_count}张道具卡：{items_text}。")
         if name == "塞翁失马":
             set_user_flag(today, uid, "fortune_linked", True)
             return await finalize(True, f"塞翁失马焉知非福？")
@@ -6862,7 +6864,7 @@ class WifePlugin(Star):
             yield event.plain_result(f"开后宫状态下无法使用“重置牛”指令哦~")
             return
         if uid in self.admins:
-            tid = self.parse_at_target(event) or uid
+            tid = self.parse_at_target(event, ignore_zero_attention=True) or uid
             if tid in ntr_records:
                 del ntr_records[tid]
                 save_ntr_records()
@@ -6922,7 +6924,7 @@ class WifePlugin(Star):
             yield event.plain_result(f"开后宫状态下无法使用“重置换”指令哦~")
             return
         if uid in self.admins:
-            tid = self.parse_at_target(event) or uid
+            tid = self.parse_at_target(event, ignore_zero_attention=True) or uid
             if tid in change_records:
                 del change_records[tid]
                 save_change_records()
@@ -7725,7 +7727,7 @@ class WifePlugin(Star):
         cancelled_demands = []
         
         # 检查所有群的赠送请求（用户作为赠送方）
-        for gid, group_entry in day_entry.items():
+        for gid, group_entry in list(day_entry.items()):
             donations = group_entry.get("donations", {})
             # 遍历所有接收方
             for receiver_uid, sender_bucket in list(donations.items()):
@@ -7743,7 +7745,7 @@ class WifePlugin(Star):
                         self._cleanup_gift_entry(today, gid)
         
         # 检查所有群的索取请求（用户作为被索取方）
-        for gid, group_entry in day_entry.items():
+        for gid, group_entry in list(day_entry.items()):
             demands = group_entry.get("demands", {})
             # 检查当前用户是否有待处理的索取请求
             if uid in demands:
