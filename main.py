@@ -40,6 +40,8 @@ BLIND_BOX_PERKS_FILE = os.path.join(CONFIG_DIR, "blind_box_perks.json")
 FORTUNE_FILE = os.path.join(CONFIG_DIR, "fortune.json")
 ARCHIVE_FILE = os.path.join(CONFIG_DIR, "archives.json")
 DISCARDED_ITEMS_FILE = os.path.join(CONFIG_DIR, "discarded_items.json")
+USER_INTERACTIONS_FILE = os.path.join(CONFIG_DIR, "user_interactions.json")
+DATA_VERSION_FILE = os.path.join(CONFIG_DIR, "data_versions.json")
 
 
 def get_today():
@@ -79,6 +81,109 @@ def save_json(path, data):
         raise
 
 
+def _load_data_versions():
+    raw = load_json(DATA_VERSION_FILE)
+    if isinstance(raw, dict):
+        return raw
+    return {}
+
+
+data_versions = _load_data_versions()
+
+
+def _save_data_versions():
+    save_json(DATA_VERSION_FILE, data_versions)
+
+
+class DataTransaction:
+    """简单的数据事务，用于批量修改多个数据集"""
+
+    def __init__(self, manager, dataset_names: tuple[str, ...]):
+        self.manager = manager
+        self.dataset_names = dataset_names
+        self.snapshots = {}
+        self.pending_saves: set[str] = set()
+
+    def __enter__(self):
+        for name in self.dataset_names:
+            data = self.manager.get(name)
+            self.snapshots[name] = copy.deepcopy(data)
+        self.manager._active_transaction = self
+        return self
+
+    def mark_dirty(self, name: str):
+        self.pending_saves.add(name)
+
+    def _restore(self):
+        for name, snapshot in self.snapshots.items():
+            target = self.manager.get(name)
+            if isinstance(target, dict):
+                target.clear()
+                target.update(copy.deepcopy(snapshot))
+            elif isinstance(target, list):
+                target.clear()
+                target.extend(copy.deepcopy(snapshot))
+            else:
+                self.manager._stores[name]["data"] = copy.deepcopy(snapshot)
+
+    def __exit__(self, exc_type, exc, tb):
+        self.manager._active_transaction = None
+        if exc_type:
+            self._restore()
+            self.pending_saves.clear()
+            return False
+        for name in self.pending_saves:
+            self.manager._flush_store(name)
+        self.pending_saves.clear()
+        self.snapshots.clear()
+        return False
+
+
+class DataManager:
+    """统一管理数据的加载、缓存、保存与事务"""
+
+    def __init__(self):
+        self._stores: dict[str, dict] = {}
+        self._active_transaction: DataTransaction | None = None
+
+    def register_store(self, name: str, loader, saver, *, version: str = "1.0"):
+        data = loader()
+        self._stores[name] = {
+            "data": data,
+            "saver": saver,
+            "version": version,
+        }
+        current_version = data_versions.get(name)
+        if current_version != version:
+            data_versions[name] = version
+            _save_data_versions()
+        return data
+
+    def get(self, name: str):
+        store = self._stores.get(name)
+        if not store:
+            raise KeyError(f"Dataset '{name}' is not registered")
+        return store["data"]
+
+    def _flush_store(self, name: str):
+        store = self._stores.get(name)
+        if not store:
+            return
+        store["saver"](store["data"])
+
+    def save(self, name: str):
+        if self._active_transaction:
+            self._active_transaction.mark_dirty(name)
+            return
+        self._flush_store(name)
+
+    def transaction(self, *names: str):
+        return DataTransaction(self, names)
+
+
+data_manager = DataManager()
+
+
 ntr_statuses = {}
 ntr_records = {}
 change_records = {}
@@ -90,57 +195,97 @@ seduce_records = {}
 reset_blind_box_records = {}
 gift_records = {}
 request_records = {}
-load_ntr_statuses = lambda: globals().update(ntr_statuses=load_json(NTR_STATUS_FILE))
-def load_ntr_records():
-    raw = load_json(NTR_RECORDS_FILE)
-    ntr_records.clear()
-    # 兼容旧格式：{gid: {uid: {date, count}}} 转换为新格式：{uid: {date, count}}
+def load_ntr_statuses():
+    """加载NTR状态数据"""
+    global ntr_statuses
+    ntr_statuses = load_json(NTR_STATUS_FILE)
+
+
+def _migrate_old_format_records(raw: dict) -> dict:
+    """
+    将旧格式记录迁移为新格式
+    旧格式：{gid: {uid: {date, count}}} 或 {gid: {uid: "date"}}
+    新格式：{uid: {date, count}}
+    """
     if not raw:
-        return
+        return {}
+    
     # 检查是否是旧格式：第一层的值是否是字典，且该字典的值是否是包含date或count的字典
-    first_key = next(iter(raw.keys()))
+    first_key = next(iter(raw.keys()), None)
+    if first_key is None:
+        return {}
+    
     first_value = raw[first_key]
     is_old_format = isinstance(first_value, dict) and any(
         isinstance(v, dict) and ("date" in v or "count" in v) for v in first_value.values()
     )
     
+    result = {}
+    
     if is_old_format:
         # 旧格式：{gid: {uid: {date, count}}}
         for gid, users in raw.items():
             for uid, rec in users.items():
+                uid_str = str(uid)
                 if isinstance(rec, str):
                     # 兼容旧格式：只有日期字符串
-                    if uid not in ntr_records:
-                        ntr_records[uid] = {"date": rec, "count": 1}
+                    if uid_str not in result:
+                        result[uid_str] = {"date": rec, "count": 1}
                     else:
-                        # 如果已存在，保留最新的记录
-                        existing_date = ntr_records[uid].get("date", "")
+                        existing_date = result[uid_str].get("date", "")
                         if rec > existing_date:
-                            ntr_records[uid] = {"date": rec, "count": 1}
+                            result[uid_str] = {"date": rec, "count": 1}
                 else:
                     # {date, count}格式
-                    if uid not in ntr_records:
-                        ntr_records[uid] = rec
+                    if uid_str not in result:
+                        result[uid_str] = rec
                     else:
-                        # 如果已存在，保留最新的记录
-                        existing_date = ntr_records[uid].get("date", "")
+                        existing_date = result[uid_str].get("date", "")
                         new_date = rec.get("date", "")
                         if new_date > existing_date:
-                            ntr_records[uid] = rec
+                            result[uid_str] = rec
                         elif new_date == existing_date:
                             # 同一天，保留更大的count
-                            ntr_records[uid]["count"] = max(ntr_records[uid].get("count", 0), rec.get("count", 0))
+                            result[uid_str]["count"] = max(result[uid_str].get("count", 0), rec.get("count", 0))
     else:
         # 新格式：{uid: {date, count}}
         for uid, rec in raw.items():
+            uid_str = str(uid)
             if isinstance(rec, str):
-                ntr_records[uid] = {"date": rec, "count": 1}
+                result[uid_str] = {"date": rec, "count": 1}
             else:
-                ntr_records[uid] = rec
-load_select_wife_records = lambda: globals().update(select_wife_records=load_json(SELECT_WIFE_RECORDS_FILE))
-load_beat_wife_records = lambda: globals().update(beat_wife_records=load_json(BEAT_WIFE_RECORDS_FILE))
-load_seduce_records = lambda: globals().update(seduce_records=load_json(SEDUCE_RECORDS_FILE))
-load_reset_blind_box_records = lambda: globals().update(reset_blind_box_records=load_json(RESET_BLIND_BOX_RECORDS_FILE))
+                result[uid_str] = rec
+    
+    return result
+
+
+def load_ntr_records():
+    """加载NTR记录，自动迁移旧格式"""
+    raw = load_json(NTR_RECORDS_FILE)
+    ntr_records.clear()
+    ntr_records.update(_migrate_old_format_records(raw))
+def load_select_wife_records():
+    """加载选老婆记录"""
+    global select_wife_records
+    select_wife_records = load_json(SELECT_WIFE_RECORDS_FILE)
+
+
+def load_beat_wife_records():
+    """加载打老婆记录"""
+    global beat_wife_records
+    beat_wife_records = load_json(BEAT_WIFE_RECORDS_FILE)
+
+
+def load_seduce_records():
+    """加载勾引记录"""
+    global seduce_records
+    seduce_records = load_json(SEDUCE_RECORDS_FILE)
+
+
+def load_reset_blind_box_records():
+    """加载重置盲盒记录"""
+    global reset_blind_box_records
+    reset_blind_box_records = load_json(RESET_BLIND_BOX_RECORDS_FILE)
 
 market_data = {}
 def load_market_data():
@@ -188,66 +333,80 @@ def load_archives():
 def save_archives():
     save_json(ARCHIVE_FILE, {"archives": archives})
 
+user_interactions = {}
+def load_user_interactions():
+    """加载用户交互记录，格式：{date: {gid: {target_uid: [uid1, uid2, ...]}}}"""
+    global user_interactions
+    raw = load_json(USER_INTERACTIONS_FILE)
+    user_interactions = raw if raw else {}
+
+def save_user_interactions():
+    """保存用户交互记录到JSON文件"""
+    save_json(USER_INTERACTIONS_FILE, user_interactions)
+
 
 def load_change_records():
+    """加载换老婆记录，自动迁移旧格式"""
     raw = load_json(CHANGE_RECORDS_FILE)
     change_records.clear()
-    # 兼容旧格式：{gid: {uid: {date, count}}} 转换为新格式：{uid: {date, count}}
-    if not raw:
-        return
-    # 检查是否是旧格式：第一层的值是否是字典，且该字典的值是否是包含date或count的字典
-    first_key = next(iter(raw.keys()))
-    first_value = raw[first_key]
-    is_old_format = isinstance(first_value, dict) and any(
-        isinstance(v, dict) and ("date" in v or "count" in v) for v in first_value.values()
-    )
-    
-    if is_old_format:
-        # 旧格式：{gid: {uid: {date, count}}}
-        for gid, users in raw.items():
-            for uid, rec in users.items():
-                if isinstance(rec, str):
-                    # 兼容旧格式：只有日期字符串
-                    if uid not in change_records:
-                        change_records[uid] = {"date": rec, "count": 1}
-                    else:
-                        # 如果已存在，保留最新的记录
-                        existing_date = change_records[uid].get("date", "")
-                        if rec > existing_date:
-                            change_records[uid] = {"date": rec, "count": 1}
-                else:
-                    # {date, count}格式
-                    if uid not in change_records:
-                        change_records[uid] = rec
-                    else:
-                        # 如果已存在，保留最新的记录
-                        existing_date = change_records[uid].get("date", "")
-                        new_date = rec.get("date", "")
-                        if new_date > existing_date:
-                            change_records[uid] = rec
-                        elif new_date == existing_date:
-                            # 同一天，保留更大的count
-                            change_records[uid]["count"] = max(change_records[uid].get("count", 0), rec.get("count", 0))
-    else:
-        # 新格式：{uid: {date, count}}
-        for uid, rec in raw.items():
-            if isinstance(rec, str):
-                change_records[uid] = {"date": rec, "count": 1}
-            else:
-                change_records[uid] = rec
+    change_records.update(_migrate_old_format_records(raw))
 
 
-save_ntr_statuses = lambda: save_json(NTR_STATUS_FILE, ntr_statuses)
-save_ntr_records = lambda: save_json(NTR_RECORDS_FILE, ntr_records)
-save_change_records = lambda: save_json(CHANGE_RECORDS_FILE, change_records)
-save_select_wife_records = lambda: save_json(SELECT_WIFE_RECORDS_FILE, select_wife_records)
-save_beat_wife_records = lambda: save_json(BEAT_WIFE_RECORDS_FILE, beat_wife_records)
-save_seduce_records = lambda: save_json(SEDUCE_RECORDS_FILE, seduce_records)
-save_reset_blind_box_records = lambda: save_json(RESET_BLIND_BOX_RECORDS_FILE, reset_blind_box_records)
-load_gift_records = lambda: globals().update(gift_records=load_json(GIFT_RECORDS_FILE))
-load_request_records = lambda: globals().update(request_records=load_json(REQUEST_RECORDS_FILE))
-save_gift_records = lambda: save_json(GIFT_RECORDS_FILE, gift_records)
-save_request_records = lambda: save_json(REQUEST_RECORDS_FILE, request_records)
+def save_ntr_statuses():
+    """保存NTR状态数据"""
+    save_json(NTR_STATUS_FILE, ntr_statuses)
+
+
+def save_ntr_records():
+    """保存NTR记录"""
+    save_json(NTR_RECORDS_FILE, ntr_records)
+
+
+def save_change_records():
+    """保存换老婆记录"""
+    save_json(CHANGE_RECORDS_FILE, change_records)
+
+
+def save_select_wife_records():
+    """保存选老婆记录"""
+    save_json(SELECT_WIFE_RECORDS_FILE, select_wife_records)
+
+
+def save_beat_wife_records():
+    """保存打老婆记录"""
+    save_json(BEAT_WIFE_RECORDS_FILE, beat_wife_records)
+
+
+def save_seduce_records():
+    """保存勾引记录"""
+    save_json(SEDUCE_RECORDS_FILE, seduce_records)
+
+
+def save_reset_blind_box_records():
+    """保存重置盲盒记录"""
+    save_json(RESET_BLIND_BOX_RECORDS_FILE, reset_blind_box_records)
+
+
+def load_gift_records():
+    """加载赠送记录"""
+    global gift_records
+    gift_records = load_json(GIFT_RECORDS_FILE)
+
+
+def load_request_records():
+    """加载索取记录"""
+    global request_records
+    request_records = load_json(REQUEST_RECORDS_FILE)
+
+
+def save_gift_records():
+    """保存赠送记录"""
+    save_json(GIFT_RECORDS_FILE, gift_records)
+
+
+def save_request_records():
+    """保存索取记录"""
+    save_json(REQUEST_RECORDS_FILE, request_records)
 
 
 GLOBAL_WIFE_FILE = os.path.join(CONFIG_DIR, "wives_global.json")
@@ -331,96 +490,156 @@ def _normalize_user_record(uid: str, record) -> dict:
     return result
 
 
+def _migrate_old_wife_configs() -> dict:
+    """
+    从旧的群配置文件格式迁移到新格式
+    旧格式：每个群一个JSON文件，格式为 {uid: [wife, date, nick]} 或 {uid: {wives, date, nick, harem}}
+    新格式：全局文件，格式为 {uid: {nick, wives, date, harem, groups: [gid1, gid2, ...]}}
+    """
+    aggregated = {}
+    for filename in os.listdir(CONFIG_DIR):
+        if not filename.endswith(".json") or filename in RESERVED_CONFIG_FILES:
+            continue
+        group_id = os.path.splitext(filename)[0]
+        old_cfg = load_json(os.path.join(CONFIG_DIR, filename))
+        if not isinstance(old_cfg, dict):
+            continue
+
+        for uid, rec in old_cfg.items():
+            uid_str = str(uid)
+            info = aggregated.setdefault(
+                uid_str,
+                {
+                    "nick": "",
+                    "wives": [],
+                    "date": get_today(),
+                    "harem": False,
+                    "groups": set(),
+                },
+            )
+            info["groups"].add(str(group_id))
+
+            # 兼容旧格式：列表格式 [wife, date, nick]
+            if isinstance(rec, list) and rec:
+                rec = {
+                    "wives": [rec[0]],
+                    "date": rec[1] if len(rec) > 1 else info["date"],
+                    "nick": rec[2] if len(rec) > 2 else info["nick"],
+                }
+
+            if not isinstance(rec, dict):
+                continue
+
+            if isinstance(rec.get("nick"), str) and rec["nick"].strip():
+                info["nick"] = rec["nick"]
+            if isinstance(rec.get("date"), str):
+                info["date"] = rec["date"]
+            if rec.get("harem"):
+                info["harem"] = True
+            if isinstance(rec.get("wives"), list):
+                for w in rec["wives"]:
+                    if isinstance(w, str) and w not in info["wives"]:
+                        info["wives"].append(w)
+
+    # 转换为新格式
+    result = {}
+    for uid, info in aggregated.items():
+        result[uid] = {
+            "nick": info["nick"] or f"用户{uid}",
+            "wives": info["wives"],
+            "date": info["date"],
+            "harem": info["harem"],
+            "groups": list(sorted(info["groups"])),
+        }
+    return result
+
+
 def load_wife_data():
+    """加载老婆数据，自动迁移旧格式"""
     raw = load_json(GLOBAL_WIFE_FILE)
     data = {}
-    if isinstance(raw, dict):
+    
+    # 如果全局文件存在且有效，直接使用
+    if isinstance(raw, dict) and raw:
         for uid, record in raw.items():
             data[str(uid)] = _normalize_user_record(str(uid), record)
+    
+    # 如果全局文件不存在或为空，尝试从旧格式迁移
     if not data:
-        aggregated = {}
-        for filename in os.listdir(CONFIG_DIR):
-            if not filename.endswith(".json") or filename in RESERVED_CONFIG_FILES:
-                continue
-            group_id = os.path.splitext(filename)[0]
-            old_cfg = load_json(os.path.join(CONFIG_DIR, filename))
-            if not isinstance(old_cfg, dict):
-                continue
-            for uid, rec in old_cfg.items():
-                uid_str = str(uid)
-                info = aggregated.setdefault(
-                    uid_str,
-                    {
-                        "nick": "",
-                        "wives": [],
-                        "date": get_today(),
-                        "harem": False,
-                        "groups": set(),
-                    },
-                )
-                info["groups"].add(str(group_id))
-                if isinstance(rec, list) and rec:
-                    rec = {
-                        "wives": [rec[0]],
-                        "date": rec[1] if len(rec) > 1 else info["date"],
-                        "nick": rec[2] if len(rec) > 2 else info["nick"],
-                    }
-                if not isinstance(rec, dict):
-                    continue
-                if isinstance(rec.get("nick"), str) and rec["nick"].strip():
-                    info["nick"] = rec["nick"]
-                if isinstance(rec.get("date"), str):
-                    info["date"] = rec["date"]
-                if rec.get("harem"):
-                    info["harem"] = True
-                if isinstance(rec.get("wives"), list):
-                    for w in rec["wives"]:
-                        if isinstance(w, str) and w not in info["wives"]:
-                            info["wives"].append(w)
-        if aggregated:
-            for uid, info in aggregated.items():
-                data[uid] = {
-                    "nick": info["nick"] or f"用户{uid}",
-                    "wives": info["wives"],
-                    "date": info["date"],
-                    "harem": info["harem"],
-                    "groups": list(sorted(info["groups"])),
-                }
+        migrated = _migrate_old_wife_configs()
+        if migrated:
+            data = migrated
             save_json(GLOBAL_WIFE_FILE, data)
-    elif raw != data:
+    
+    # 如果数据有变化，保存（用于规范化）
+    if raw != data:
         save_json(GLOBAL_WIFE_FILE, data)
+    
     return data
 
 
-wives_data = load_wife_data()
+def _load_wife_store():
+    return load_wife_data()
+
+
+def _save_wife_store(data: dict):
+    save_json(GLOBAL_WIFE_FILE, data)
+
+
+wives_data = data_manager.register_store(
+    "wives_data",
+    loader=_load_wife_store,
+    saver=_save_wife_store,
+    version="2.0",
+)
+
+_group_config_cache: dict[str, dict] = {}
+_GROUP_CONFIG_CACHE_LIMIT = 64
 
 
 def save_wife_data():
-    # 保存全局老婆数据
-    save_json(GLOBAL_WIFE_FILE, wives_data)
+    data_manager.save("wives_data")
+    _group_config_cache.clear()
 
 
 def _ensure_user_entry(uid: str, nick: str = "") -> dict:
+    """
+    确保用户记录存在并规范化格式
+    如果记录不存在，创建新记录；如果存在，确保格式正确
+    """
     uid = str(uid)
-    entry = wives_data.setdefault(
-        uid,
-        {
-            "nick": nick or f"用户{uid}",
-            "wives": [],
-            "date": get_today(),
-            "harem": False,
-            "groups": [],
-        },
-    )
-    if nick:
-        entry["nick"] = nick
-    entry.setdefault("wives", [])
-    entry.setdefault("date", get_today())
-    entry.setdefault("harem", False)
-    groups = entry.get("groups")
-    if not isinstance(groups, list):
-        groups = []
-    entry["groups"] = [str(g) for g in groups if g]
+    
+    # 如果记录已存在，规范化它
+    if uid in wives_data:
+        entry = wives_data[uid]
+        # 确保所有必需字段存在
+        entry.setdefault("nick", nick or f"用户{uid}")
+        entry.setdefault("wives", [])
+        entry.setdefault("date", get_today())
+        entry.setdefault("harem", False)
+        entry.setdefault("groups", [])
+
+        # 更新昵称（如果提供了新的）
+        if nick:
+            entry["nick"] = nick
+
+        # 规范化groups字段
+        groups = entry.get("groups", [])
+        if not isinstance(groups, list):
+            groups = []
+        entry["groups"] = [str(g) for g in groups if g]
+
+        return entry
+    
+    # 创建新记录
+    entry = {
+        "nick": nick or f"用户{uid}",
+        "wives": [],
+        "date": get_today(),
+        "harem": False,
+        "groups": [],
+    }
+    wives_data[uid] = entry
     return entry
 
 
@@ -695,16 +914,28 @@ class GroupConfigDict(dict):
 
 def load_group_config(group_id: str) -> GroupConfigDict:
     gid = str(group_id)
+    cached = _group_config_cache.get(gid)
     cfg = GroupConfigDict(gid)
+    if cached is not None:
+        for uid, record in cached.items():
+            dict.__setitem__(cfg, uid, copy.deepcopy(record))
+        return cfg
     for uid, record in wives_data.items():
         normalized = _ensure_user_entry(uid, record.get("nick", f"用户{uid}"))
         if gid in normalized.get("groups", []):
-            dict.__setitem__(cfg, str(uid), normalized)
+            dict.__setitem__(cfg, str(uid), copy.deepcopy(normalized))
+    _group_config_cache[gid] = {uid: copy.deepcopy(rec) for uid, rec in cfg.items()}
+    if len(_group_config_cache) > _GROUP_CONFIG_CACHE_LIMIT:
+        _group_config_cache.pop(next(iter(_group_config_cache)))
     return cfg
 
 
 def save_group_config(cfg: GroupConfigDict | None = None):
     save_wife_data()
+    if cfg:
+        _group_config_cache[cfg.group_id] = {uid: copy.deepcopy(rec) for uid, rec in cfg.items()}
+        if len(_group_config_cache) > _GROUP_CONFIG_CACHE_LIMIT:
+            _group_config_cache.pop(next(iter(_group_config_cache)))
 
 
 def load_swap_requests():
@@ -755,16 +986,25 @@ def save_blind_box_perks():
 load_blind_box_perks()
 
 # 运势数据
-fortune_data = {}
-
-def load_fortune_data():
+def _load_fortune_store():
     raw = load_json(FORTUNE_FILE)
-    globals()["fortune_data"] = raw.get("fortunes", {})
+    return raw.get("fortunes", {})
+
+
+def _save_fortune_store(data: dict):
+    save_json(FORTUNE_FILE, {"fortunes": data})
+
+
+fortune_data = data_manager.register_store(
+    "fortune_data",
+    loader=_load_fortune_store,
+    saver=_save_fortune_store,
+    version="1.1",
+)
+
 
 def save_fortune_data():
-    save_json(FORTUNE_FILE, {"fortunes": fortune_data})
-
-load_fortune_data()
+    data_manager.save("fortune_data")
 
 # 运势配置
 FORTUNE_TYPES = {
@@ -1035,17 +1275,25 @@ def increment_pity_count(uid: str):
     set_pity_count(uid, current + 1)
 
 
-def load_item_data():
+def _load_item_store():
     raw = load_json(ITEMS_FILE)
-    globals()["item_data"] = raw.get("item_data", {})
+    return raw.get("item_data", {})
+
+
+def _save_item_store(data: dict):
+    save_json(ITEMS_FILE, {"item_data": data})
+
+
+item_data = data_manager.register_store(
+    "item_data",
+    loader=_load_item_store,
+    saver=_save_item_store,
+    version="1.1",
+)
 
 
 def save_item_data():
-    save_json(ITEMS_FILE, {"item_data": item_data})
-
-
-item_data = {}
-load_item_data()
+    data_manager.save("item_data")
 
 def load_discarded_items():
     raw = load_json(DISCARDED_ITEMS_FILE)
@@ -1066,13 +1314,25 @@ def get_avatar_url(user_id: str) -> str:
 
 
 # ---------------- 道具效果状态存储：按天/按用户 ----------------
-def load_effects():
+def _load_effects_store():
     raw = load_json(EFFECTS_FILE)
-    globals()["effects_data"] = raw.get("effects_data", {})
+    return raw.get("effects_data", {})
+
+
+def _save_effects_store(data: dict):
+    save_json(EFFECTS_FILE, {"effects_data": data})
+
+
+effects_data = data_manager.register_store(
+    "effects_data",
+    loader=_load_effects_store,
+    saver=_save_effects_store,
+    version="1.1",
+)
 
 
 def save_effects():
-    save_json(EFFECTS_FILE, {"effects_data": effects_data})
+    data_manager.save("effects_data")
 
 
 def get_user_effects(today: str, uid: str) -> dict:
@@ -1158,10 +1418,54 @@ def get_user_effects(today: str, uid: str) -> dict:
                 "lightbulb_group": None,  # 电灯泡监听群
                 "sage_expire_ts": None,  # 贤者时间过期时间戳
                 "ban_items_expire_ts": None,  # 道具禁用过期时间戳
+                "loan_expire_ts": None,  # 高利贷过期时间戳
+                "loan_item_count": 0,  # 高利贷需要失去的道具数量
             },
         }
         day_map[uid] = eff
+    # 检查高利贷过期
+    meta = eff.setdefault("meta", {})
+    loan_expire_ts = meta.get("loan_expire_ts")
+    if loan_expire_ts:
+        now_ts = datetime.utcnow().timestamp()
+        if now_ts >= loan_expire_ts:
+            # 高利贷到期，失去道具
+            loan_count = int(meta.get("loan_item_count", 0) or 0)
+            if loan_count > 0:
+                today_items = item_data.setdefault(today, {})
+                user_items = today_items.get(uid, [])
+                if user_items:
+                    # 随机失去指定数量的道具卡
+                    lose_count = min(loan_count, len(user_items))
+                    lost_items = random.sample(user_items, lose_count)
+                    for item in lost_items:
+                        user_items.remove(item)
+                    if not user_items:
+                        del today_items[uid]
+                    else:
+                        today_items[uid] = user_items
+                    save_item_data()
+                    # 清除高利贷标记
+                    meta["loan_expire_ts"] = None
+                    meta["loan_item_count"] = 0
+                    save_effects()
     return eff
+
+
+CONTRADICTORY_STATE_GROUPS = [
+    {
+        "name": "公交车与纯爱战士",
+        "flags": ["force_swap", "protect_from_ntr"],
+    },
+    {
+        "name": "公交车与开后宫",
+        "flags": ["force_swap", "harem"],
+    },
+    {
+        "name": "纯爱战士与苦主",
+        "flags": ["protect_from_ntr", "victim_auto_ntr"],
+    },
+]
 
 
 def get_user_flag(today: str, uid: str, flag_key: str) -> bool:
@@ -1401,8 +1705,6 @@ def set_group_meta(today: str, gid: str, key: str, value):
     save_effects()
 
 
-effects_data = {}
-load_effects()
 load_ntr_statuses()
 load_ntr_records()
 load_change_records()
@@ -1419,6 +1721,7 @@ load_market_purchase_records()
 load_gift_requests()
 cleanup_gift_requests()
 load_archives()
+load_user_interactions()
 
 # 记录上次清理的日期
 _last_cleanup_date = None
@@ -1429,6 +1732,7 @@ def cleanup_daily_data(today: str):
     global reset_blind_box_records, select_wife_records, beat_wife_records, seduce_records
     global market_purchase_records, gift_requests, market_data
     global ntr_records, change_records, swap_limit_records, gift_records, request_records
+    global user_interactions
     
     # 如果今天已经清理过，跳过
     if _last_cleanup_date == today:
@@ -1535,6 +1839,15 @@ def cleanup_daily_data(today: str):
             for date in old_keys:
                 del market_data[date]
             save_market_data()
+            cleaned = True
+    
+    # 清理 user_interactions: {date: {gid: {target_uid: [uid1, uid2, ...]}}}
+    if user_interactions:
+        old_keys = [date for date in user_interactions.keys() if date != today]
+        if old_keys:
+            for date in old_keys:
+                del user_interactions[date]
+            save_user_interactions()
             cleaned = True
     
     # 清理 reset_shared_records: {gid: {uid: {date, count}}}
@@ -1649,6 +1962,8 @@ class WifePlugin(Star):
         self.market_max_items = 8
         # 存储大凶骰子结果，键为 (today, uid)，值为 "大吉" 或 "大凶"
         self.doom_dice_results = {}
+        # 存储【厄兆】事件的提示语，键为 (today, uid)，值为提示语字符串
+        self.doom_omen_messages = {}
         self.item_pool = [
             "牛魔王",
             "开后宫",
@@ -1724,6 +2039,13 @@ class WifePlugin(Star):
             "高雅人士",
             "光盘行动",
             "大胃袋",
+            "奇迹于你",
+            "坏逼卡",
+            "情敌",
+            "离婚",
+            "高利贷",
+            "催眠",
+            "左脚绊右脚",
         ]
         # 道具品质配置：quality值范围1-5，1为最低品质，5为最高品质
         self.item_quality = {
@@ -1768,12 +2090,12 @@ class WifePlugin(Star):
             "枪兵": 2,
             "修罗": 3,
             "吉星如意": 5,
-            "穷凶极恶": 4,
+            "穷凶极恶": 3,
             "缘分": 2,
-            "55开": 5,
+            "55开": 4,
             "洗牌": 2,
             "塞翁失马": 5,
-            "斗转星移": 4,
+            "斗转星移": 3,
             "好兄弟": 5,
             "夏日重现": 5,
             "叠叠乐": 5,
@@ -1801,8 +2123,15 @@ class WifePlugin(Star):
             "高雅人士": 4,
             "光盘行动": 3,
             "大胃袋": 2,
+            "奇迹于你": 5,
+            "坏逼卡": 2,
+            "情敌": 2,
+            "离婚": 3,
+            "高利贷": 3,
+            "催眠": 3,
+            "左脚绊右脚": 3,
         }
-        self.items_need_target = {"雌堕", "雄竞", "勾引", "牛道具", "偷拍", "复读", "好兄弟", "月老", "最后的波纹", "好人卡"}
+        self.items_need_target = {"雌堕", "雄竞", "勾引", "牛道具", "偷拍", "复读", "好兄弟", "月老", "最后的波纹", "好人卡", "坏逼卡", "情敌", "催眠"}
         
         # 验证所有道具都有品质定义
         for item in self.item_pool:
@@ -1830,7 +2159,7 @@ class WifePlugin(Star):
             {
                 "id": "harem",
                 "label": "开后宫",
-                "desc": "开后宫：今日可以拥有多个老婆，使用「牛老婆」后会追加一次不消耗次数的「抽老婆」，但无法使用「换老婆」与「重置」指令",
+                "desc": "开后宫：今日可以拥有多个老婆，使用「牛老婆」后会追加一次不消耗次数的「抽老婆」，但无法使用「换老婆」与「重置」指令，且会随着老婆数量增加修罗场【厄兆】触发概率",
                 "item_name": "开后宫",
                 "checker": flag_checker("harem"),
             },
@@ -1871,7 +2200,7 @@ class WifePlugin(Star):
             {
                 "id": "landmine_girl",
                 "label": "病娇",
-                "desc": "病娇：你的老婆不会被牛走，但成功牛别人时可能遭遇惩罚",
+                "desc": "病娇：你的老婆不会被牛走，但成功牛别人时可能遭遇惩罚或【厄兆】事件",
                 "item_name": "病娇",
                 "checker": flag_checker("landmine_girl"),
             },
@@ -2059,9 +2388,16 @@ class WifePlugin(Star):
             {
                 "id": "doom_dice",
                 "label": "大凶骰子",
-                "desc": "大凶骰子：你今日在进行所有概率判定前都会掷一枚D20，19面为大吉，1面为大凶；大吉时正面概率翻倍、负面概率减半；大凶时正面概率为0%、负面概率为90%",
+                "desc": "大凶骰子：你今日在进行所有概率判定前都会掷一枚D20，19面为大吉，1面为大凶；大吉时正面概率翻倍、负面概率减半；大凶时正面概率为0%、负面概率为90%并触发【厄兆】事件",
                 "item_name": "大凶骰子",
                 "checker": flag_checker("doom_dice"),
+            },
+            {
+                "id": "omen_pioneer",
+                "label": "奇迹于你",
+                "desc": "奇迹于你：当你触发【厄兆】事件时，随机使一个群友替你承担该事件",
+                "item_name": "奇迹于你",
+                "checker": flag_checker("omen_pioneer"),
             },
             {
                 "id": "stinky_penguin",
@@ -2107,7 +2443,7 @@ class WifePlugin(Star):
             {
                 "id": "riddler",
                 "label": "谜语人",
-                "desc": "谜语人：今日他人对你使用的指令或道具以及你使用的指令或道具时@的目标将随机化（不会随机到没有任何数据的用户）",
+                "desc": "谜语人：今日他人对你使用的指令或道具以及你使用的指令或道具@的目标将随机化（不会随机到没有任何数据的用户）",
                 "item_name": "谜语人",
                 "checker": flag_checker("riddler"),
             },
@@ -2213,6 +2549,11 @@ class WifePlugin(Star):
         }
         # 状态效果道具（不可重复获得）
         self.status_items = set(self.status_item_specs.keys())
+        self.flag_label_map = {
+            spec["id"]: spec.get("label", spec["id"])
+            for spec in self.status_effect_specs
+            if spec.get("id")
+        }
         self.keyword_image_cache = {}
         # 柏青哥三状态随机池配置（道具名称, 是否已拥有检查器）
         # 从status_item_specs自动获取所有状态，排除一些不应该出现在柏青哥中的状态
@@ -2339,7 +2680,7 @@ class WifePlugin(Star):
             return []
         return random.sample(candidates, count)
 
-    def parse_at_target(self, event, ignore_zero_attention: bool = False):
+    def parse_at_target(self, event, ignore_zero_attention: bool = False, ignore_riddler: bool = False):
         # 解析@目标用户
         # ignore_zero_attention: 是否忽略"0人问你"状态（管理员指令使用）
         today = get_today()
@@ -2355,7 +2696,7 @@ class WifePlugin(Star):
                 break
         
         # 检查谜语人效果：如果使用者或目标有"谜语人"状态，则随机化目标
-        if original_target:
+        if original_target and not ignore_riddler:
             should_randomize = False
             # 检查使用者是否有谜语人状态
             if get_user_flag(today, uid, "riddler"):
@@ -2389,7 +2730,13 @@ class WifePlugin(Star):
                         return uid
         return None
 
-    def parse_multi_targets(self, event, limit: int | None = None, ignore_zero_attention: bool = False) -> list[str]:
+    def parse_multi_targets(
+        self,
+        event,
+        limit: int | None = None,
+        ignore_zero_attention: bool = False,
+        ignore_riddler: bool = False,
+    ) -> list[str]:
         # ignore_zero_attention: 是否忽略"0人问你"状态（管理员指令使用）
         today = get_today()
         uid = str(event.get_sender_id())
@@ -2407,13 +2754,14 @@ class WifePlugin(Star):
         
         # 检查谜语人效果：如果使用者或任何目标有"谜语人"状态，则随机化目标
         should_randomize = False
-        if get_user_flag(today, uid, "riddler"):
-            should_randomize = True
-        else:
-            for target_uid in original_targets:
-                if get_user_flag(today, target_uid, "riddler"):
-                    should_randomize = True
-                    break
+        if not ignore_riddler:
+            if get_user_flag(today, uid, "riddler"):
+                should_randomize = True
+            else:
+                for target_uid in original_targets:
+                    if get_user_flag(today, target_uid, "riddler"):
+                        should_randomize = True
+                        break
         
         if should_randomize and original_targets:
             valid_targets = self._get_valid_targets_for_riddler(gid, exclude_uid=uid)
@@ -2435,6 +2783,25 @@ class WifePlugin(Star):
                 return randomized_targets[:limit] if limit else randomized_targets
         
         return original_targets
+
+    def _resolve_conflicting_states(self, today: str, uid: str):
+        """检测并清理互斥状态，返回解除的组合与被清除的flag集合"""
+        resolved_groups = []
+        cleared_flags: set[str] = set()
+        for group in CONTRADICTORY_STATE_GROUPS:
+            flags = group.get("flags", [])
+            if flags and all(get_user_flag(today, uid, flag) for flag in flags):
+                resolved_groups.append(group)
+                for flag in flags:
+                    set_user_flag(today, uid, flag, False)
+                    cleared_flags.add(flag)
+        return resolved_groups, cleared_flags
+
+    def _format_flag_names(self, flags: set[str]) -> str:
+        if not flags:
+            return ""
+        labels = [self.flag_label_map.get(flag, flag) for flag in sorted(flags)]
+        return "、".join(labels)
 
     def _build_image_component(self, img: str):
         if not img:
@@ -2896,53 +3263,53 @@ class WifePlugin(Star):
             if target_uid and target_uid != uid:  # 不能给自己赋予
                 set_user_flag(today, target_uid, "cupid_arrow", True)
         
-        # 检测"丘比特之箭"配对逻辑：当同一个群内同时拥有两个带有"丘比特之箭"的用户时
+        # 检测并处理配对逻辑：当同一个群内同时拥有两个或更多带有"丘比特之箭"的用户时
         cfg = load_group_config(gid)
-        cupid_arrow_users = []
-        for user_id in cfg.keys():
-            if get_user_flag(today, user_id, "cupid_arrow"):
-                cupid_arrow_users.append(user_id)
+        messages = []
+        max_pairings = 10  # 限制最大配对次数，避免无限循环
         
-        # 如果恰好有两个用户拥有"丘比特之箭"，66%概率让他们互相成为对方老婆
-        if len(cupid_arrow_users) == 2:
-            uid1, uid2 = cupid_arrow_users[0], cupid_arrow_users[1]
-            
-            # 66%概率配对成功
-            if random.random() < 0.66:
-                # 移除"丘比特之箭"状态
-                set_user_flag(today, uid1, "cupid_arrow", False)
-                set_user_flag(today, uid2, "cupid_arrow", False)
-                
-                # 获取双方头像
-                user1_avatar = self._get_user_wife_image(today, uid1)
-                user2_avatar = self._get_user_wife_image(today, uid2)
-                
-                # 获取双方昵称
-                user1_info = cfg.get(uid1, {})
-                user1_nick = user1_info.get("nick", f"用户{uid1}") if isinstance(user1_info, dict) else f"用户{uid1}"
-                user2_info = cfg.get(uid2, {})
-                user2_nick = user2_info.get("nick", f"用户{uid2}") if isinstance(user2_info, dict) else f"用户{uid2}"
-                
-                # 互相成为对方老婆
-                add_wife(cfg, uid1, user2_avatar, today, user1_nick, False)
-                add_wife(cfg, uid2, user1_avatar, today, user2_nick, False)
-                save_group_config(cfg)
-                
-                # 发送配对成功消息（这里返回消息，由调用者决定如何处理）
-                return f"配对成功！{user1_nick}和{user2_nick}互相成为了对方的老婆！"
+        for _ in range(max_pairings):
+            cupid_arrow_users = []
+            # 使用iter_group_users遍历所有群成员，包括没有老婆的用户
+            for user_id, _, _ in iter_group_users(gid):
+                if get_user_flag(today, user_id, "cupid_arrow"):
+                    cupid_arrow_users.append(user_id)
+
+            if len(cupid_arrow_users) >= 2:
+                uid1, uid2 = random.sample(cupid_arrow_users, 2)
+                if random.random() < 0.66:
+                    set_user_flag(today, uid1, "cupid_arrow", False)
+                    set_user_flag(today, uid2, "cupid_arrow", False)
+
+                    user1_avatar = self._get_user_wife_image(today, uid1)
+                    user2_avatar = self._get_user_wife_image(today, uid2)
+
+                    user1_info = cfg.get(uid1, {})
+                    user1_nick = user1_info.get("nick", f"用户{uid1}") if isinstance(user1_info, dict) else f"用户{uid1}"
+                    user2_info = cfg.get(uid2, {})
+                    user2_nick = user2_info.get("nick", f"用户{uid2}") if isinstance(user2_info, dict) else f"用户{uid2}"
+
+                    add_wife(cfg, uid1, user2_avatar, today, user1_nick, False)
+                    add_wife(cfg, uid2, user1_avatar, today, user2_nick, False)
+                    save_group_config(cfg)
+
+                    messages.append(f"配对成功！{user1_nick}和{user2_nick}互相成为了对方的老婆！")
+                else:
+                    set_user_flag(today, uid1, "cupid_arrow", False)
+                    set_user_flag(today, uid2, "cupid_arrow", False)
+
+                    user1_info = cfg.get(uid1, {})
+                    user1_nick = user1_info.get("nick", f"用户{uid1}") if isinstance(user1_info, dict) else f"用户{uid1}"
+                    user2_info = cfg.get(uid2, {})
+                    user2_nick = user2_info.get("nick", f"用户{uid2}") if isinstance(user2_info, dict) else f"用户{uid2}"
+
+                    messages.append(f"丘比特之箭未能成功配对，{user1_nick}和{user2_nick}的缘分似乎还不够深。")
             else:
-                # 配对失败，移除"丘比特之箭"状态
-                set_user_flag(today, uid1, "cupid_arrow", False)
-                set_user_flag(today, uid2, "cupid_arrow", False)
-                
-                # 获取双方昵称
-                user1_info = cfg.get(uid1, {})
-                user1_nick = user1_info.get("nick", f"用户{uid1}") if isinstance(user1_info, dict) else f"用户{uid1}"
-                user2_info = cfg.get(uid2, {})
-                user2_nick = user2_info.get("nick", f"用户{uid2}") if isinstance(user2_info, dict) else f"用户{uid2}"
-                
-                # 发送配对失败消息
-                return f"丘比特之箭未能成功配对，{user1_nick}和{user2_nick}的缘分似乎还不够深。"
+                break
+        
+        # 返回所有配对消息，用换行符连接
+        if messages:
+            return "\n".join(messages)
         
         return None
     
@@ -3295,7 +3662,7 @@ class WifePlugin(Star):
         drawn_status = set()  # 已抽取的状态效果道具（不可重复）
         
         # 计算各品质的基础概率
-        base_quality_probs = {2: 0.40, 3: 0.25, 4: 0.20, 5: 0.15}
+        base_quality_probs = {2: 0.45, 3: 0.30, 4: 0.15, 5: 0.10}
         
         # 计算调整后的品质概率（使用统一概率计算逻辑）
         def calculate_quality_probs():
@@ -3347,7 +3714,8 @@ class WifePlugin(Star):
                     additive_bonus=additive,
                     gain_multiplier=1.0,  # 品质概率计算不使用增益乘区
                     apply_special=True,   # 应用特殊乘区（幸运E）
-                    apply_final=apply_final  # 只有4~5星应用最终乘区
+                    apply_final=apply_final,  # 只有4~5星应用最终乘区
+                    gid=gid  # 传递gid用于大凶骰子清空效果
                 )
                 probs[quality] = adjusted_prob
             
@@ -3501,10 +3869,10 @@ class WifePlugin(Star):
         # 检查老千状态：抽盲盒时50%概率获得随机道具卡
         cheat_bonus = None
         if get_user_flag(today, uid, "cheat"):
-            # 该判定视为“中立效果”：会受幸运E等影响，但不受大凶骰子影响
+            # 该判定视为"中立效果"：会受幸运E等影响，但不受大凶骰子影响
             if self._probability_check(0.5, today, uid, positive=True, apply_doom_dice=False):
                 if self.item_pool:
-                    drawn = self._draw_item_by_quality(today, uid, count=1, cfg=cfg)
+                    drawn = self._draw_item_by_quality(today, uid, count=1, cfg=cfg, gid=gid)
                     if drawn:
                         bonus_item = drawn[0]
                     existing_items.append(bonus_item)
@@ -3558,13 +3926,12 @@ class WifePlugin(Star):
             if used >= max_reset_blind_box:
                 yield event.plain_result(f"你今天已经使用过「重置盲盒」{max_reset_blind_box}次啦~")
                 return
-            if uid not in today_items:
-                yield event.plain_result(f"你今天还没有抽过盲盒，无需重置哦~")
-                return
+            reset_blind_box_records.setdefault(today, {})
             discarded_cards = list(today_items.get(uid, []))
             if discarded_cards:
                 self._record_discarded_items(today, gid, discarded_cards)
-            del today_items[uid]
+            if uid in today_items:
+                del today_items[uid]
             save_item_data()
             day_record[uid] = used + 1
             save_reset_blind_box_records()
@@ -3592,11 +3959,12 @@ class WifePlugin(Star):
             else:
                 yield event.plain_result(f"已为本群{affected}位成员重置盲盒次数，已保留他们现有的道具卡。")
             return
-        target_uid = self.parse_at_target(event)
+        is_admin = uid in admin_ids
+        target_uid = self.parse_at_target(event, ignore_riddler=is_admin)
         if not target_uid:
             yield event.plain_result(f"请在“重置盲盒”后@需要重置的目标用户哦~")
             return
-        if uid not in admin_ids:
+        if not is_admin:
             yield event.plain_result(f"仅管理员才能为他人重置盲盒次数哦~")
             return
         target_uid = str(target_uid)
@@ -3739,7 +4107,7 @@ class WifePlugin(Star):
             # 手留余香效果
             bonus_msg = ""
             if get_user_flag(today, uid, "hand_scent") and self.item_pool:
-                drawn = self._draw_item_by_quality(today, uid, count=1, cfg=cfg)
+                drawn = self._draw_item_by_quality(today, uid, count=1, cfg=cfg, gid=gid)
                 if drawn:
                     reward_card = drawn[0]
                     user_items.append(reward_card)
@@ -4038,9 +4406,25 @@ class WifePlugin(Star):
     async def view_status(self, event: AstrMessageEvent):
         today = get_today()
         gid = str(event.message_obj.group_id)
-        uid = str(event.get_sender_id())
-        nick = event.get_sender_name()
-        gid = str(event.message_obj.group_id)
+        sender_uid = str(event.get_sender_id())
+        sender_nick = event.get_sender_name()
+        
+        # 解析@目标用户
+        target_uid = self.parse_at_target(event)
+        if target_uid:
+            # 查询目标用户的状态
+            uid = target_uid
+            target_record = get_group_record(target_uid, gid)
+            if isinstance(target_record, dict):
+                nick = target_record.get("nick", f"用户{target_uid}")
+            else:
+                nick = f"用户{target_uid}"
+            display_prefix = f"{nick}当前"
+        else:
+            # 查询自己的状态
+            uid = sender_uid
+            nick = sender_nick
+            display_prefix = "你当前"
         
         # 收集面板数据（mods相关数值）
         panel_data = []
@@ -4123,7 +4507,10 @@ class WifePlugin(Star):
         
         # 如果没有数据，返回文字提示
         if not panel_data and not status_data:
-            yield event.plain_result(f"你目前没有任何状态效果，安心抽老婆吧~")
+            if target_uid:
+                yield event.plain_result(f"{nick}目前没有任何状态效果，安心抽老婆吧~")
+            else:
+                yield event.plain_result(f"你目前没有任何状态效果，安心抽老婆吧~")
             return
         
         # 生成图片
@@ -4133,7 +4520,7 @@ class WifePlugin(Star):
             temp_path = os.path.join(PLUGIN_DIR, f"status_{uid}_{today}.png")
             img.save(temp_path)
             # 发送图片
-            yield event.chain_result([Plain(f"你当前的状态效果："), AstrImage.fromFileSystem(temp_path)])
+            yield event.chain_result([Plain(f"{display_prefix}的状态效果："), AstrImage.fromFileSystem(temp_path)])
             # 删除临时文件
             try:
                 os.remove(temp_path)
@@ -4153,7 +4540,7 @@ class WifePlugin(Star):
                         all_texts.append(item_data[0])
                     else:
                         all_texts.append(item_data)
-            msg = f"你当前的状态效果：\n" + "\n".join(f"- {text}" for text in all_texts)
+            msg = f"{display_prefix}的状态效果：\n" + "\n".join(f"- {text}" for text in all_texts)
             yield event.plain_result(msg)
     
     def _generate_status_image(self, nick: str, panel_data: list, status_data: list):
@@ -4431,7 +4818,7 @@ class WifePlugin(Star):
                 [
                     "抽老婆：获取今日老婆；普通用户每日一次，开后宫可多抽但有修罗场风险",
                     "查老婆[@目标/昵称]：查看自己或指定对象今日老婆，支持@或昵称关键词",
-                    "查状态：生成状态面板图片，面板展示数值，状态展示已激活效果",
+                    "查状态[@目标/昵称]：生成状态面板图片，面板展示数值，状态展示已激活效果",
                     "老婆插件帮助：查看本说明",
                 ],
             ),
@@ -4573,29 +4960,28 @@ class WifePlugin(Star):
         if card_name not in user_items:
             yield event.plain_result(f"你今天的道具卡里没有“{card_name}”哦~")
             return
-        success, message = await self.apply_item_effect(card_name, event, target_uid, extra_arg, skip_stacking_tower=False)
-        if success:
-            # 洗牌和出千（提升品质）道具已经在apply_item_effect中处理了道具，不需要再次移除
-            if card_name == "洗牌":
-                # 洗牌已经清空了所有道具，取消所有相关的赠送和索取请求
-                cancelled_donations, cancelled_demands = self._cancel_all_requests_for_user(today, uid)
-                if cancelled_donations or cancelled_demands:
-                    cancel_msgs = []
-                    for gid, receiver_uid, receiver_nick, item_name in cancelled_donations:
-                        cancel_msgs.append(f"你向{receiver_nick}赠送「{item_name}」的请求已自动取消（道具已使用）")
-                    for gid, requester_uid, requester_nick, item_name in cancelled_demands:
-                        cancel_msgs.append(f"{requester_nick}向你索取「{item_name}」的请求已自动取消（道具已使用）")
-                    if cancel_msgs:
-                        cancel_msg = "\n".join(cancel_msgs)
-                        message = f"{message}\n{cancel_msg}" if message else cancel_msg
-            elif card_name == "出千":
-                # 出千：如果是提升品质，已经在apply_item_effect中处理；如果是获得老千状态，需要移除道具
-                if card_name in user_items:
-                    # 检查是否获得了老千状态（提升品质的情况已经在apply_item_effect中更新了道具列表）
-                    if get_user_flag(today, uid, "cheat"):
+        with data_manager.transaction("item_data", "effects_data", "wives_data"):
+            success, message = await self.apply_item_effect(
+                card_name, event, target_uid, extra_arg, skip_stacking_tower=False
+            )
+            if target_uid:
+                self._record_user_interaction(today, gid, uid, str(target_uid))
+            if success:
+                if card_name == "洗牌":
+                    cancelled_donations, cancelled_demands = self._cancel_all_requests_for_user(today, uid)
+                    if cancelled_donations or cancelled_demands:
+                        cancel_msgs = []
+                        for gid, receiver_uid, receiver_nick, item_name in cancelled_donations:
+                            cancel_msgs.append(f"你向{receiver_nick}赠送「{item_name}」的请求已自动取消（道具已使用）")
+                        for gid, requester_uid, requester_nick, item_name in cancelled_demands:
+                            cancel_msgs.append(f"{requester_nick}向你索取「{item_name}」的请求已自动取消（道具已使用）")
+                        if cancel_msgs:
+                            cancel_msg = "\n".join(cancel_msgs)
+                            message = f"{message}\n{cancel_msg}" if message else cancel_msg
+                elif card_name == "出千":
+                    if card_name in user_items and get_user_flag(today, uid, "cheat"):
                         user_items.remove(card_name)
                         save_item_data()
-                        # 取消相关的赠送和索取请求
                         cancelled_donations, cancelled_demands = self._cancel_requests_for_item(today, uid, card_name)
                         if cancelled_donations or cancelled_demands:
                             cancel_msgs = []
@@ -4606,56 +4992,54 @@ class WifePlugin(Star):
                             if cancel_msgs:
                                 cancel_msg = "\n".join(cancel_msgs)
                                 message = f"{message}\n{cancel_msg}" if message else cancel_msg
-            else:
-                # 其他道具正常移除
-                if card_name in user_items:
-                    user_items.remove(card_name)
-                    save_item_data()
-                    # 取消相关的赠送和索取请求
-                    cancelled_donations, cancelled_demands = self._cancel_requests_for_item(today, uid, card_name)
-                    if cancelled_donations or cancelled_demands:
-                        cancel_msgs = []
-                        for gid, receiver_uid, receiver_nick in cancelled_donations:
-                            cancel_msgs.append(f"你向{receiver_nick}赠送「{card_name}」的请求已自动取消（道具已使用）")
-                        for gid, requester_uid, requester_nick in cancelled_demands:
-                            cancel_msgs.append(f"{requester_nick}向你索取「{card_name}」的请求已自动取消（道具已使用）")
-                        if cancel_msgs:
-                            cancel_msg = "\n".join(cancel_msgs)
-                            message = f"{message}\n{cancel_msg}" if message else cancel_msg
-                bonus_card = self._maybe_trigger_magic_circuit(today, uid)
-                if bonus_card:
-                    extra_msg = f"魔术回路发动！你获得了随机道具卡「{bonus_card}」。"
-                    message = f"{message}\n{extra_msg}" if message else extra_msg
-                # 检查老千状态：使用道具时50%概率获得随机道具卡
-                if get_user_flag(today, uid, "cheat"):
-                    if self._probability_check(0.5, today, uid, positive=True):
+                else:
+                    if card_name in user_items:
+                        user_items.remove(card_name)
+                        save_item_data()
+                        cancelled_donations, cancelled_demands = self._cancel_requests_for_item(today, uid, card_name)
+                        if cancelled_donations or cancelled_demands:
+                            cancel_msgs = []
+                            for gid, receiver_uid, receiver_nick in cancelled_donations:
+                                cancel_msgs.append(f"你向{receiver_nick}赠送「{card_name}」的请求已自动取消（道具已使用）")
+                            for gid, requester_uid, requester_nick in cancelled_demands:
+                                cancel_msgs.append(f"{requester_nick}向你索取「{card_name}」的请求已自动取消（道具已使用）")
+                            if cancel_msgs:
+                                cancel_msg = "\n".join(cancel_msgs)
+                                message = f"{message}\n{cancel_msg}" if message else cancel_msg
+                    bonus_card = self._maybe_trigger_magic_circuit(today, uid)
+                    if bonus_card:
+                        extra_msg = f"魔术回路发动！你获得了随机道具卡「{bonus_card}」。"
+                        message = f"{message}\n{extra_msg}" if message else extra_msg
+                    if get_user_flag(today, uid, "cheat") and self._probability_check(0.5, today, uid, positive=True):
                         doom_result = self._get_doom_dice_result(today, uid)
                         if self.item_pool:
-                            drawn = self._draw_item_by_quality(today, uid, count=1, cfg=cfg)
+                            drawn = self._draw_item_by_quality(today, uid, count=1, cfg=cfg, gid=gid)
                             if drawn:
                                 cheat_bonus = drawn[0]
-                            user_items.append(cheat_bonus)
-                            save_item_data()
-                            cheat_msg = f"老千发动！你额外获得了一张随机道具卡「{cheat_bonus}」。"
-                            if doom_result:
-                                cheat_msg = f"【{doom_result}】{cheat_msg}"
-                            message = f"{message}\n{cheat_msg}" if message else cheat_msg
-            # 吃一堑：若目标拥有长一智，则目标也获得一张同名道具卡
-            if target_uid is not None:
-                target_str = str(target_uid)
-                if target_str != uid and get_user_flag(today, target_str, "learned"):
-                    target_items = today_items.setdefault(target_str, [])
-                    target_items.append(card_name)
-                    save_item_data()
-            # 记录道具使用时间（盲盒爱好者状态）
-            if is_blind_box_enthusiast:
-                now = datetime.utcnow().timestamp()
-                set_user_meta(today, uid, "last_item_use_time", now)
+                                user_items.append(cheat_bonus)
+                                save_item_data()
+                                cheat_msg = f"老千发动！你额外获得了一张随机道具卡「{cheat_bonus}」。"
+                                if doom_result:
+                                    cheat_msg = f"【{doom_result}】{cheat_msg}"
+                                message = f"{message}\n{cheat_msg}" if message else cheat_msg
+                if target_uid is not None:
+                    target_str = str(target_uid)
+                    if target_str != uid and get_user_flag(today, target_str, "learned"):
+                        target_items = today_items.setdefault(target_str, [])
+                        target_items.append(card_name)
+                        save_item_data()
+                if is_blind_box_enthusiast:
+                    now = datetime.utcnow().timestamp()
+                    set_user_meta(today, uid, "last_item_use_time", now)
         # 检查是否有大凶骰子结果需要添加到消息前缀
         doom_result = self._get_doom_dice_result(today, uid)
+        omen_message = self._get_doom_omen_message(today, uid)
         final_message = message or f"道具卡「{card_name}」已处理。"
         if doom_result:
             final_message = f"【{doom_result}】{final_message}"
+            # 如果有【厄兆】事件提示语，添加到消息中
+            if omen_message:
+                final_message = f"{final_message}\n{omen_message}"
         yield event.plain_result(final_message)
 
     async def apply_item_effect(
@@ -4730,9 +5114,16 @@ class WifePlugin(Star):
             ):
                 set_user_flag(today, uid, "double_item_effect", False)
             # 检查是否有大凶骰子结果需要添加到消息前缀
+            # 注意：无论message是否为空，都要清除大凶骰子结果，避免结果残留导致重复显示
             doom_result = self._get_doom_dice_result(today, uid)
-            if doom_result and message:
-                message = f"【{doom_result}】{message}"
+            omen_message = self._get_doom_omen_message(today, uid)
+            if doom_result:
+                if message:
+                    message = f"【{doom_result}】{message}"
+                    if omen_message:
+                        message = f"{message}\n{omen_message}"
+                else:
+                    message = f"【{doom_result}】{omen_message or ''}".rstrip()
             # 爱神状态：当使用指令或道具成功对目标生效时，给目标赋予"丘比特之箭"状态
             # 注意：对于群体效果道具，需要在道具效果中单独调用_handle_cupid_effect
             if success_flag and target_uid:
@@ -4745,8 +5136,11 @@ class WifePlugin(Star):
             if success_flag and get_user_flag(today, uid, "tasting"):
                 # 50%概率（正面概率，受加成影响）
                 base_prob = 0.5
-                adjusted_prob = self._calculate_probability(base_prob, today, uid, gain_multiplier=1.0)
+                adjusted_prob = self._calculate_probability(base_prob, today, uid, gain_multiplier=1.0, gid=gid)
                 adjusted_prob = min(0.9, adjusted_prob)  # 概率上限为90%
+                # 清除品鉴中状态触发的大凶骰子结果（如果品鉴中状态触发了概率判定，大凶骰子结果会被清除）
+                # 注意：品鉴中状态不使用大凶骰子前缀，所以需要清除结果避免残留
+                _ = self._get_doom_dice_result(today, uid)
                 if random.random() < adjusted_prob:
                     # 获取群内所有其他用户（排除自己）
                     others = [str(u) for u in cfg.keys() if u != uid]
@@ -4803,6 +5197,9 @@ class WifePlugin(Star):
                                     message = stacking_msg
                         finally:
                             setattr(event, "_stacking_tower_triggering", False)
+            # 在finalize函数最后，清除所有残留的大凶骰子结果，避免结果残留导致重复显示
+            # 注意：所有需要显示大凶骰子前缀的地方都应该在获取结果后立即使用，这里只是清理残留
+            _ = self._get_doom_dice_result(today, uid)
             return success_flag, message
         # 长一智被动效果：如果本次道具有明确目标，且目标拥有长一智，则目标在生效后获得同名道具卡
         learned_target_uid = None
@@ -4925,6 +5322,25 @@ class WifePlugin(Star):
         if name == "偷外卖":
             set_user_flag(today, uid, "light_fingers", True)
             return await finalize(True, f"你学会了顺手的事：牛成功或在集市购物时，有50%概率顺手牵羊一张道具卡，50%概率被抓失去自己的道具卡。")
+        if name == "左脚绊右脚":
+            resolved_groups, cleared_flags = self._resolve_conflicting_states(today, uid)
+            if not cleared_flags:
+                return await finalize(False, f"你现在脚步稳健，没有需要解除的矛盾状态。")
+            conflict_name_parts = []
+            for group in resolved_groups:
+                label = group.get("name")
+                if not label:
+                    label = self._format_flag_names(set(group.get("flags", [])))
+                if label:
+                    conflict_name_parts.append(label)
+            conflict_names = "、".join(conflict_name_parts)
+            cleared_text = self._format_flag_names(cleared_flags)
+            message_parts = []
+            if conflict_names:
+                message_parts.append(f"解除矛盾组合：{conflict_names}")
+            if cleared_text:
+                message_parts.append(f"已清除状态：{cleared_text}")
+            return await finalize(True, "；".join(message_parts))
         if name == "咕咕嘎嘎":
             set_user_flag(today, uid, "stinky_penguin", True)
             return await finalize(True, f"你获得了「臭企鹅」状态！从现在起，当你成为别人老婆时，会由「高松灯」顶替你。")
@@ -5098,7 +5514,7 @@ class WifePlugin(Star):
             return await finalize(True, msg)
         if name == "谜语人":
             set_user_flag(today, uid, "riddler", True)
-            return await finalize(True, f"谜语人滚出克！今日他人对你使用的指令或道具以及你使用的指令或道具时@的目标将随机化（不会随机到没有任何数据的用户）")
+            return await finalize(True, f"谜语人滚出克！今日他人对你使用的指令或道具以及你使用的指令或道具@的目标将随机化（不会随机到没有任何数据的用户）")
         if name == "最后的波纹":
             if not target_uid:
                 return await finalize(False, f"使用「最后的波纹」时请@目标用户哦~")
@@ -5244,6 +5660,13 @@ class WifePlugin(Star):
         if name == "硬凹":
             # 获得2次重置盲盒机会（考虑二度寝翻倍效果）
             add_user_mod(today, uid, "reset_blind_box_extra", 2 * double_factor)
+            day_record = reset_blind_box_records.setdefault(today, {})
+            used = int(day_record.get(uid, 0))
+            reset_blind_box_extra = int(get_user_mod(today, uid, "reset_blind_box_extra", 0))
+            max_reset_blind_box = 1 + reset_blind_box_extra
+            if used > max_reset_blind_box:
+                day_record[uid] = max_reset_blind_box
+                save_reset_blind_box_records()
             return await finalize(True, f"你就凹吧，你获得了{2 * double_factor}次重置盲盒机会。")
         if name == "好人卡":
             if not target_uid:
@@ -5255,7 +5678,7 @@ class WifePlugin(Star):
                 return await finalize(False, f"对方正处于贤者时间，无法接收道具。")
             
             # 给目标添加一张随机道具卡
-            drawn = self._draw_item_by_quality(today, target_uid, count=1, cfg=cfg)
+            drawn = self._draw_item_by_quality(today, target_uid, count=1, cfg=cfg, gid=gid)
             if not drawn:
                 return await finalize(False, f"未能为目标生成道具卡。")
             new_card = drawn[0]
@@ -5425,7 +5848,7 @@ class WifePlugin(Star):
             # 成功分支：对方成为你的老婆
             # 使用统一概率计算（穷凶极恶效果在增益乘区中处理）
             base_prob = 0.5
-            adjusted_prob = self._calculate_probability(base_prob, today, uid, gain_multiplier=1.0)
+            adjusted_prob = self._calculate_probability(base_prob, today, uid, gain_multiplier=1.0, gid=gid)
             adjusted_prob = min(0.9, adjusted_prob)  # 概率上限为90%
             if random.random() < adjusted_prob:
                 img = self._get_user_wife_image(today, target_uid)
@@ -5717,7 +6140,7 @@ class WifePlugin(Star):
             async def effect_random_item():
                 today_items = item_data.setdefault(today, {})
                 user_items = today_items.setdefault(uid, [])
-                drawn = self._draw_item_by_quality(today, uid, count=double_factor, cfg=cfg)
+                drawn = self._draw_item_by_quality(today, uid, count=double_factor, cfg=cfg, gid=gid)
                 if drawn:
                     user_items.extend(drawn)
                     save_item_data()
@@ -5736,7 +6159,7 @@ class WifePlugin(Star):
             async def effect_two_items():
                 today_items = item_data.setdefault(today, {})
                 user_items = today_items.setdefault(uid, [])
-                random_items = self._draw_item_by_quality(today, uid, count=2 * double_factor, cfg=cfg)
+                random_items = self._draw_item_by_quality(today, uid, count=2 * double_factor, cfg=cfg, gid=gid)
                 if random_items:
                     user_items.extend(random_items)
                     save_item_data()
@@ -5993,34 +6416,28 @@ class WifePlugin(Star):
             set_user_flag(today, uid, "junpei", True)
             return await finalize(True, f"你获得了{3 * double_factor}次额外赠送指令次数，并获得了「淳平」状态！")
         if name == "柏青哥":
-            # 清空所有道具
-            if today in item_data and uid in item_data[today]:
-                lost_items = len(item_data[today][uid])
-                del item_data[today][uid]
-                save_item_data()
-                if lost_items:
-                    self._handle_item_loss(today, uid, lost_items, gid)
             # 随机触发一种效果
             choice = random.choice(["reset_and_gain", "pachinko_777", "three_states", "mute_300"])
             if choice == "reset_and_gain":
-                # 用完今日所有的换老婆、牛老婆、重置、重置盲盒次数
-                # 将当前使用次数设置为最大值（表示已用完），但不修改额外次数
+                if today in item_data and uid in item_data[today]:
+                    lost_items = len(item_data[today][uid])
+                    del item_data[today][uid]
+                    save_item_data()
+                    if lost_items:
+                        self._handle_item_loss(today, uid, lost_items, gid)
                 gid = str(event.message_obj.group_id)
-                # 换老婆次数：设置为最大值表示已用完
                 change_rec = change_records.get(uid, {"date": "", "count": 0})
                 if change_rec.get("date") == today:
                     max_change = (self.change_max_per_day or 0) + int(get_user_mod(today, uid, "change_extra_uses", 0))
                     change_rec["count"] = max_change
                     change_records[uid] = change_rec
                     save_change_records()
-                # 牛老婆次数：设置为最大值表示已用完
                 ntr_rec = ntr_records.get(uid, {"date": "", "count": 0})
                 if ntr_rec.get("date") == today:
                     max_ntr = (self.ntr_max or 0) + int(get_user_mod(today, uid, "ntr_extra_uses", 0))
                     ntr_rec["count"] = max_ntr
                     ntr_records[uid] = ntr_rec
                     save_ntr_records()
-                # 重置次数
                 reset_records = load_json(RESET_SHARED_FILE)
                 grp = reset_records.setdefault(gid, {})
                 rec = grp.get(uid, {"date": today, "count": 0})
@@ -6030,14 +6447,11 @@ class WifePlugin(Star):
                     rec["count"] = max_reset
                     grp[uid] = rec
                     save_json(RESET_SHARED_FILE, reset_records)
-                # 重置盲盒次数
                 day_record = reset_blind_box_records.setdefault(today, {})
-                used = int(day_record.get(uid, 0))
                 reset_blind_box_extra = int(get_user_mod(today, uid, "reset_blind_box_extra", 0))
                 max_reset_blind_box = 1 + reset_blind_box_extra
                 day_record[uid] = max_reset_blind_box
                 save_reset_blind_box_records()
-                # 随机获得1~6次换老婆的次数、1~6次牛老婆的次数、0~3次重置次数、0~3次重置盲盒次数（受二度寝翻倍）
                 base_change_gain = random.randint(1, 6)
                 base_ntr_gain = random.randint(1, 6)
                 base_reset_gain = random.randint(0, 3)
@@ -6046,7 +6460,6 @@ class WifePlugin(Star):
                 ntr_gain = base_ntr_gain * double_factor
                 reset_gain = base_reset_gain * double_factor
                 reset_blind_box_gain = base_reset_blind_box_gain * double_factor
-                # 开后宫用户：换老婆次数转换为抽老婆次数
                 is_harem = get_user_flag(today, uid, "harem")
                 if is_harem:
                     self._convert_change_to_draw_for_harem(today, uid, gid, change_gain)
@@ -6057,7 +6470,10 @@ class WifePlugin(Star):
                 add_user_mod(today, uid, "reset_blind_box_extra", reset_blind_box_gain)
                 save_change_records()
                 save_ntr_records()
-                return await finalize(True, f"666！你已用完今日所有次数，并获得{change_gain}次换老婆、{ntr_gain}次牛老婆、{reset_gain}次重置、{reset_blind_box_gain}次重置盲盒机会。")
+                return await finalize(
+                    True,
+                    f"666！你已用完今日所有次数并清空道具，并获得{change_gain}次换老婆、{ntr_gain}次牛老婆、{reset_gain}次重置、{reset_blind_box_gain}次重置盲盒机会。",
+                )
             elif choice == "pachinko_777":
                 # 获得"777"效果
                 set_user_flag(today, uid, "pachinko_777", True)
@@ -6136,6 +6552,191 @@ class WifePlugin(Star):
             # 获得大凶骰子状态：所有概率判定前会掷一次D20
             set_user_flag(today, uid, "doom_dice", True)
             return await finalize(True, f"你掷出了「大凶骰子」！今日所有概率事件前都会预先掷一枚20面骰子，可能大吉也可能大凶……")
+        if name == "奇迹于你":
+            # 获得"奇迹于你"状态
+            set_user_flag(today, uid, "omen_pioneer", True)
+            return await finalize(True, f"你成为了「奇迹于你」！当你触发【厄兆】事件时，会随机让一个群友替你承担。")
+        if name == "坏逼卡":
+            if not target_uid:
+                return await finalize(False, f"使用「坏逼卡」时请@目标用户哦~")
+            target_uid = str(target_uid)
+            if target_uid == uid:
+                return await finalize(False, f"不能对自己使用「坏逼卡」哦~")
+            if get_user_flag(today, target_uid, "ban_items"):
+                return await finalize(False, f"对方正处于贤者时间，暂时无法对其使用道具。")
+            today_items = item_data.setdefault(today, {})
+            target_items = today_items.get(target_uid, [])
+            if not target_items:
+                return await finalize(False, f"对方今天没有道具卡可丢弃。")
+            # 随机丢弃一张道具卡
+            discarded_item = random.choice(target_items)
+            target_items.remove(discarded_item)
+            if not target_items:
+                del today_items[target_uid]
+            else:
+                today_items[target_uid] = target_items
+            save_item_data()
+            # 记录到回收站
+            self._record_discarded_items(today, gid, [discarded_item])
+            target_info = cfg.get(target_uid, {})
+            target_nick = target_info.get("nick", f"用户{target_uid}") if isinstance(target_info, dict) else f"用户{target_uid}"
+            fortune_msg = self._handle_item_loss(today, target_uid, 1, gid)
+            msg = f"坏逼来了！{target_nick}随机丢弃了一张道具卡「{discarded_item}」。"
+            if fortune_msg:
+                msg += f"\n{target_nick}{fortune_msg.replace('福祸相依：', '的福祸相依：')}"
+            return await finalize(True, msg)
+        if name == "情敌":
+            if not target_uid:
+                return await finalize(False, f"使用「情敌」时请@目标用户哦~")
+            target_uid = str(target_uid)
+            if target_uid == uid:
+                return await finalize(False, f"不能对自己使用「情敌」哦~")
+            if get_user_flag(today, target_uid, "ban_items"):
+                return await finalize(False, f"对方正处于贤者时间，暂时无法对其使用道具。")
+            target_wives = get_wives_list(cfg, target_uid, today)
+            if not target_wives:
+                return await finalize(False, f"对方今天还没有老婆可失去。")
+            # 随机失去一个老婆
+            lost_wife = random.choice(target_wives)
+            target_wives.remove(lost_wife)
+            if target_uid in cfg:
+                if len(target_wives) == 0:
+                    del cfg[target_uid]
+                else:
+                    cfg[target_uid]["wives"] = target_wives
+                    if not get_user_flag(today, target_uid, "harem"):
+                        cfg[target_uid]["harem"] = False
+                save_group_config(cfg)
+            fortune_msg = self._handle_wife_loss(today, target_uid, 1, gid)
+            target_info = cfg.get(target_uid, {})
+            target_nick = target_info.get("nick", f"用户{target_uid}") if isinstance(target_info, dict) else f"用户{target_uid}"
+            display_name = self._format_wife_name(cfg, lost_wife)
+            msg = f"得不到就毁掉！{target_nick}随机失去了一个老婆「{display_name}」。"
+            if fortune_msg:
+                msg += f"\n{target_nick}{fortune_msg.replace('福祸相依：', '的福祸相依：')}"
+            return await finalize(True, msg)
+        if name == "离婚":
+            user_wives = get_wives_list(cfg, uid, today)
+            if not user_wives:
+                return await finalize(False, f"你今天还没有老婆，无法离婚。")
+            wife_count = len(user_wives)
+            if uid in cfg:
+                del cfg[uid]
+                save_group_config(cfg)
+            fortune_msg = self._handle_wife_loss(today, uid, wife_count, gid)
+            msg = f"离婚！你失去了所有老婆（共{wife_count}个）。"
+            
+            # 分财产：失去一半道具（如果用户是纯爱战士则不会失去道具，和平分手）
+            is_pure_love = get_user_flag(today, uid, "protect_from_ntr")
+            if not is_pure_love:
+                today_items = item_data.setdefault(today, {})
+                user_items = today_items.get(uid, [])
+                if user_items:
+                    # 计算要失去的道具数量（向上取整，至少失去1个）
+                    lose_count = max(1, (len(user_items) + 1) // 2)
+                    # 随机选择要失去的道具
+                    lost_items = random.sample(user_items, min(lose_count, len(user_items)))
+                    for item in lost_items:
+                        user_items.remove(item)
+                    if not user_items:
+                        del today_items[uid]
+                    else:
+                        today_items[uid] = user_items
+                    save_item_data()
+                    msg += f"\n分财产：你失去了{len(lost_items)}张道具卡。"
+            else:
+                msg += f"\n和平分手：作为纯爱战士，你保留了所有道具卡。"
+            
+            if fortune_msg:
+                msg += f"\n{fortune_msg}"
+            return await finalize(True, msg)
+        if name == "高利贷":
+            # 获得2张随机道具卡
+            drawn_items = self._draw_item_by_quality(today, uid, 2, cfg=cfg, gid=gid)
+            if drawn_items:
+                today_items = item_data.setdefault(today, {})
+                user_items = today_items.setdefault(uid, [])
+                user_items.extend(drawn_items)
+                save_item_data()
+                items_text = "、".join(drawn_items)
+                # 设置半小时后失去4张道具卡
+                eff = get_user_effects(today, uid)
+                meta = eff.setdefault("meta", {})
+                meta["loan_expire_ts"] = datetime.utcnow().timestamp() + 1800  # 半小时 = 1800秒
+                meta["loan_item_count"] = 4
+                save_effects()
+                return await finalize(True, f"高利贷生效！你获得了2张随机道具卡：{items_text}。但半小时后你将失去4张随机道具卡。")
+            else:
+                # 即使没抽到道具，也要设置定时失去
+                eff = get_user_effects(today, uid)
+                meta = eff.setdefault("meta", {})
+                meta["loan_expire_ts"] = datetime.utcnow().timestamp() + 1800
+                meta["loan_item_count"] = 4
+                save_effects()
+                return await finalize(True, f"高利贷生效！但你没有抽到任何道具卡。半小时后你将失去4张随机道具卡（如果你有的话）。")
+        if name == "催眠":
+            # 强制目标使用一张道具卡（随机，如果使用的道具卡需要@目标则随机指定群内的目标）
+            if not target_uid:
+                return await finalize(False, f"使用「催眠」时请@目标哦~")
+            target_str = str(target_uid)
+            if target_str == uid:
+                return await finalize(False, f"不能对自己使用「催眠」哦~")
+            
+            # 检查目标用户是否有道具卡
+            today_items = item_data.setdefault(today, {})
+            target_items = today_items.get(target_str, [])
+            if not target_items:
+                target_info = cfg.get(target_str, {})
+                target_nick = target_info.get("nick", f"用户{target_str}") if isinstance(target_info, dict) else f"用户{target_str}"
+                return await finalize(False, f"{target_nick}今天还没有道具卡，无法被催眠。")
+            
+            # 随机选择一张道具卡
+            forced_card = random.choice(target_items)
+            
+            # 如果该道具卡需要@目标，则随机选择一个群内目标（排除目标用户自己）
+            forced_target_uid = None
+            if forced_card in self.items_need_target:
+                # 获取群内其他用户作为随机目标（排除目标用户自己）
+                random_targets = self._pick_random_group_members(gid, count=1, exclude={target_str}, allow_zero_attention=False)
+                if random_targets:
+                    forced_target_uid = random_targets[0]
+                else:
+                    # 如果没有可用的目标，无法使用需要@目标的道具卡
+                    target_info = cfg.get(target_str, {})
+                    target_nick = target_info.get("nick", f"用户{target_str}") if isinstance(target_info, dict) else f"用户{target_str}"
+                    return await finalize(False, f"催眠失败！{target_nick}随机到的道具卡「{forced_card}」需要@目标，但群内没有可用的目标。")
+            
+            # 先移除道具卡（避免在apply_item_effect中重复处理）
+            target_items.remove(forced_card)
+            if not target_items:
+                del today_items[target_str]
+            else:
+                today_items[target_str] = target_items
+            save_item_data()
+            
+            # 调用apply_item_effect来执行该道具卡的效果，使用caller_uid参数指定执行者为目标用户
+            target_info = cfg.get(target_str, {})
+            target_nick = target_info.get("nick", f"用户{target_str}") if isinstance(target_info, dict) else f"用户{target_str}"
+            success, effect_msg = await self.apply_item_effect(
+                forced_card,
+                event,
+                forced_target_uid,
+                "",
+                caller_uid=target_str,
+                use_double_effect=False,  # 催眠强制使用的道具不触发二度寝等效果
+                consume_double_effect=False,
+                skip_stacking_tower=True,  # 跳过叠叠乐检测
+            )
+            
+            # 构建返回消息
+            if success:
+                msg = f"催眠成功！{target_nick}被强制使用了道具卡「{forced_card}」。"
+                if effect_msg:
+                    msg += f"\n{effect_msg}"
+            else:
+                msg = f"催眠成功！{target_nick}被强制使用了道具卡「{forced_card}」，但效果执行失败：{effect_msg}"
+            
+            return await finalize(True, msg)
         if name == "后宫王的特权":
             # 检查是否处于开后宫状态
             if not get_user_flag(today, uid, "harem"):
@@ -6284,18 +6885,40 @@ class WifePlugin(Star):
                     prob = 0.05 * (1.33 ** wife_count) * chaos_multiplier
                     prob = min(prob, 0.9)
                     if self._probability_check(prob, today, uid, positive=False):
-                        # 触发修罗场，失去所有老婆
-                        if uid in cfg:
-                            loss = wife_count
-                            del cfg[uid]
-                            save_group_config(cfg)
-                            fortune_msg = self._handle_wife_loss(today, uid, loss, gid)
-                        # 触发修罗场后获得一次抽老婆（换老婆）机会
-                        add_user_mod(today, uid, "change_extra_uses", 1)
-                        msg = f"修罗场爆发！你失去了所有老婆......但获得了一次抽老婆的机会。"
-                        if fortune_msg:
-                            msg += f"\n{fortune_msg}"
-                        yield event.plain_result(msg)
+                        # 触发修罗场【厄兆】事件
+                        def shura_omen_handler(today, target_uid, gid):
+                            target_cfg = load_group_config(gid)
+                            target_wife_count = get_wife_count(target_cfg, target_uid, today)
+                            if target_uid in target_cfg:
+                                loss = target_wife_count
+                                del target_cfg[target_uid]
+                                save_group_config(target_cfg)
+                                self._handle_wife_loss(today, target_uid, loss, gid)
+                            # 触发修罗场后获得一次抽老婆（换老婆）机会
+                            add_user_mod(today, target_uid, "change_extra_uses", 1)
+                        
+                        self._trigger_omen_event(
+                            today, uid, gid,
+                            "shura",
+                            f"修罗场爆发！失去了所有老婆（{wife_count}个）",
+                            shura_omen_handler
+                        )
+                        # 如果奇迹于你转移了事件，原用户仍然获得抽老婆机会
+                        if not get_user_flag(today, uid, "omen_pioneer"):
+                            if uid in cfg:
+                                loss = wife_count
+                                del cfg[uid]
+                                save_group_config(cfg)
+                                fortune_msg = self._handle_wife_loss(today, uid, loss, gid)
+                            add_user_mod(today, uid, "change_extra_uses", 1)
+                            msg = f"修罗场爆发！你失去了所有老婆......但获得了一次抽老婆的机会。"
+                            if fortune_msg:
+                                msg += f"\n{fortune_msg}"
+                            yield event.plain_result(msg)
+                        else:
+                            # 奇迹于你转移了事件，原用户不受影响，但仍获得抽老婆机会
+                            add_user_mod(today, uid, "change_extra_uses", 1)
+                            yield event.plain_result(f"修罗场爆发！但奇迹于你效果发动，事件已转移，你获得了一次抽老婆的机会。")
                         return
         else:
             # 普通用户：今天已抽则直接返回
@@ -6613,7 +7236,7 @@ class WifePlugin(Star):
         defense_bonus = float(get_user_mod(today, tid, "ntr_defense_bonus", 0.0))
         base_ntr_prob = max(0.0, min(0.9, (self.ntr_possibility or 0.0) + attack_bonus + defense_bonus))
         # 使用统一概率计算（穷凶极恶效果在增益乘区中处理）
-        final_prob = self._calculate_probability(base_ntr_prob, today, uid, gain_multiplier=1.0)
+        final_prob = self._calculate_probability(base_ntr_prob, today, uid, gain_multiplier=1.0, gid=gid)
         final_prob = min(0.9, final_prob)  # 保持原有上限
         forced_success = False
         if get_user_flag(today, uid, "next_ntr_guarantee"):
@@ -6674,16 +7297,34 @@ class WifePlugin(Star):
                     yield event.plain_result(f"你被你的老婆打晕了......但好消息是，你还活着")
                     return
                 elif event_choice == "suicide":
-                    # 你原本的老婆自杀了（即原本的老婆将消失，你牛到的老婆也不会添加到你的wives列表）
+                    # 触发病娇自杀【厄兆】事件
+                    def suicide_omen_handler(today, target_uid, gid):
+                        target_cfg = load_group_config(gid)
+                        target_loss = get_wife_count(target_cfg, target_uid, today)
+                        if target_uid in target_cfg:
+                            del target_cfg[target_uid]
+                        save_group_config(target_cfg)
+                        self._handle_wife_loss(today, target_uid, target_loss, gid)
+                    
                     loss = get_wife_count(cfg, uid, today)
-                    if uid in cfg:
-                        del cfg[uid]
-                    save_group_config(cfg)
-                    fortune_msg = self._handle_wife_loss(today, uid, loss, gid)
-                    msg = f"你的老婆自杀了......你失去了所有老婆。"
-                    if fortune_msg:
-                        msg += f"\n{fortune_msg}"
-                    yield event.plain_result(msg)
+                    self._trigger_omen_event(
+                        today, uid, gid,
+                        "suicide",
+                        f"你的老婆自杀了......失去了所有老婆（{loss}个）",
+                        suicide_omen_handler
+                    )
+                    # 如果奇迹于你转移了事件，原用户不会失去老婆，但也不会获得新老婆
+                    if not get_user_flag(today, uid, "omen_pioneer"):
+                        if uid in cfg:
+                            del cfg[uid]
+                            save_group_config(cfg)
+                        fortune_msg = self._handle_wife_loss(today, uid, loss, gid)
+                        msg = f"你的老婆自杀了......你失去了所有老婆。"
+                        if fortune_msg:
+                            msg += f"\n{fortune_msg}"
+                        yield event.plain_result(msg)
+                    else:
+                        yield event.plain_result(f"你的老婆自杀了......但奇迹于你效果发动，事件已转移。")
                     return
                 elif event_choice == "get_item":
                     # 获得一张何意味道具卡
@@ -6708,6 +7349,8 @@ class WifePlugin(Star):
                 ntr_timestamps.append(now)
                 set_user_meta(today, uid, "do_whatever_ntr_timestamps", ntr_timestamps)
             equal_rights_msg = equal_rights_prefix if 'equal_rights_prefix' in locals() else ""
+            # 记录用户交互关系（牛老婆成功）
+            self._record_user_interaction(today, gid, uid, tid)
             yield event.plain_result(f"{equal_rights_msg}牛老婆成功！老婆已归你所有，恭喜恭喜~")
             if cancel_msg:
                 yield event.plain_result(cancel_msg)
@@ -6955,7 +7598,7 @@ class WifePlugin(Star):
             yield event.plain_result(f"开后宫状态下无法使用“重置牛”指令哦~")
             return
         if uid in self.admins:
-            tid = self.parse_at_target(event, ignore_zero_attention=True) or uid
+            tid = self.parse_at_target(event, ignore_zero_attention=True, ignore_riddler=True) or uid
             if tid in ntr_records:
                 del ntr_records[tid]
                 save_ntr_records()
@@ -7015,7 +7658,7 @@ class WifePlugin(Star):
             yield event.plain_result(f"开后宫状态下无法使用“重置换”指令哦~")
             return
         if uid in self.admins:
-            tid = self.parse_at_target(event, ignore_zero_attention=True) or uid
+            tid = self.parse_at_target(event, ignore_zero_attention=True, ignore_riddler=True) or uid
             if tid in change_records:
                 del change_records[tid]
                 save_change_records()
@@ -7234,6 +7877,9 @@ class WifePlugin(Star):
             data_t = cfg.get(tid, {})
             nick_u = data_u.get("nick", f"用户{uid}") if isinstance(data_u, dict) else f"用户{uid}"
             nick_t = data_t.get("nick", f"用户{tid}") if isinstance(data_t, dict) else f"用户{tid}"
+            # 记录用户交互关系（交换老婆成功）
+            self._record_user_interaction(today, gid, uid, tid)
+            self._record_user_interaction(today, gid, tid, uid)  # 双方互相记录
             # 交换老婆
             cfg[uid] = {"wives": [wives_t[0]], "date": today, "nick": nick_u}
             cfg[tid] = {"wives": [wives_u[0]], "date": today, "nick": nick_t}
@@ -7579,7 +8225,7 @@ class WifePlugin(Star):
             eff = get_user_effects(today, uid)
             status_count = sum(1 for v in eff.get("flags", {}).values() if v)
             additive_bonus = status_count * 0.02  # 每个状态+2%
-        adjusted_prob = self._calculate_probability(base_prob, today, uid, additive_bonus=additive_bonus, gain_multiplier=1.0)
+        adjusted_prob = self._calculate_probability(base_prob, today, uid, additive_bonus=additive_bonus, gain_multiplier=1.0, gid=gid)
         adjusted_prob = min(0.9, adjusted_prob)  # 概率上限为90%
         if random.random() < adjusted_prob:
             cfg = load_group_config(gid)
@@ -7588,6 +8234,8 @@ class WifePlugin(Star):
             add_wife(cfg, uid, img, today, nick, is_harem)
             save_group_config(cfg)
             cancel_msg = await self.cancel_swap_on_wife_change(gid, [uid, target_uid])
+            # 记录用户交互关系（勾引成功）
+            self._record_user_interaction(today, gid, uid, target_uid)
             seduce_equal_rights_msg = seduce_equal_rights_prefix if 'seduce_equal_rights_prefix' in locals() else ""
             msg = f"{seduce_equal_rights_msg}勾引成功！对方已经拜倒在你的脂包肌下了。"
             if cancel_msg:
@@ -7612,7 +8260,7 @@ class WifePlugin(Star):
             yield event.plain_result(f"仅管理员才能使用「重开」指令哦~")
             return
         # 解析目标（管理员指令需无视0人问你状态）
-        target_uid = self.parse_at_target(event, ignore_zero_attention=True)
+        target_uid = self.parse_at_target(event, ignore_zero_attention=True, ignore_riddler=True)
         if not target_uid:
             yield event.plain_result(f"请@你想清空数据的目标用户哦~")
             return
@@ -7663,6 +8311,12 @@ class WifePlugin(Star):
         # 清空重置盲盒记录（如果日期是今天）
         if today in reset_blind_box_records and target_uid in reset_blind_box_records[today]:
             del reset_blind_box_records[today][target_uid]
+        # 清空老婆集市购买记录（如果日期是今天）
+        if today in market_purchase_records and target_uid in market_purchase_records[today]:
+            del market_purchase_records[today][target_uid]
+            if not market_purchase_records[today]:
+                del market_purchase_records[today]
+            save_market_purchase_records()
         # 清空交换限制记录（如果日期是今天）
         if gid in swap_limit_records and target_uid in swap_limit_records[gid]:
             rec_lim = swap_limit_records[gid][target_uid]
@@ -7752,7 +8406,7 @@ class WifePlugin(Star):
                 quality_pools[quality].append(item)
         
         # 使用基础品质概率（不考虑用户状态）
-        base_quality_probs = {2: 0.40, 3: 0.25, 4: 0.20, 5: 0.15}
+        base_quality_probs = {2: 0.45, 3: 0.30, 4: 0.15, 5: 0.10}
         
         # 抽取道具
         selection = []
@@ -7922,7 +8576,8 @@ class WifePlugin(Star):
                                 apply_final: bool = True,
                                 *,
                                 positive: bool = True,
-                                apply_doom_dice: bool = True) -> float:
+                                apply_doom_dice: bool = True,
+                                gid: str = None) -> float:
         """
         统一的概率计算函数，按照4个乘区顺序计算
         
@@ -7936,6 +8591,7 @@ class WifePlugin(Star):
         - apply_final: 是否应用最终乘区（今日运势、吉星如意）
         - positive: 当前判定是否为正面概率（True 为正面，如收益；False 为负面，如损失、惩罚）
         - apply_doom_dice: 是否应用大凶骰子（用于中立判定时关闭大凶骰子影响）
+        - gid: 群ID（可选，用于大凶骰子掷出大凶时清空老婆或道具卡）
         
         返回：调整后的概率值
         """
@@ -7963,6 +8619,38 @@ class WifePlugin(Star):
                         prob = 0.0
                     else:
                         prob = 0.9
+                    # 大凶额外效果：随机失去所有老婆、道具卡或大凶骰子状态（三者触发其一）
+                    # 随机选择失去老婆、道具卡或大凶骰子状态
+                    lose_type = random.choice(["wife", "item", "doom_dice"])
+                    key = (today, uid)
+                    if lose_type == "wife":
+                        # 清空所有老婆（需要gid）
+                        if gid:
+                            cfg = load_group_config(gid)
+                            loss = get_wife_count(cfg, uid, today)
+                            if loss > 0:
+                                if uid in cfg:
+                                    del cfg[uid]
+                                    save_group_config(cfg)
+                                    self._handle_wife_loss(today, uid, loss, gid)
+                                    # 存储【厄兆】事件提示语
+                                    self.doom_omen_messages[key] = f"【厄兆】你失去了所有老婆（{loss}个）"
+                    elif lose_type == "item":
+                        # 清空所有道具卡（需要gid）
+                        if gid:
+                            if today in item_data and uid in item_data[today]:
+                                lost_items = len(item_data[today][uid])
+                                if lost_items > 0:
+                                    del item_data[today][uid]
+                                    save_item_data()
+                                    self._handle_item_loss(today, uid, lost_items, gid)
+                                    # 存储【厄兆】事件提示语
+                                    self.doom_omen_messages[key] = f"【厄兆】你失去了所有道具卡（{lost_items}张）"
+                    else:
+                        # 失去大凶骰子状态（不需要gid）
+                        set_user_flag(today, uid, "doom_dice", False)
+                        # 存储【厄兆】事件提示语
+                        self.doom_omen_messages[key] = "【厄兆】你失去了大凶骰子状态"
                 else:
                     # 大吉：正面概率翻倍，负面概率减半
                     self.doom_dice_results[(today, uid)] = "大吉"
@@ -8019,6 +8707,7 @@ class WifePlugin(Star):
         """
         生成带大凶骰子前缀的 plain_result
         如果本次概率判定触发了大凶骰子，会在消息前添加前缀
+        如果触发了【厄兆】事件，会同时显示【厄兆】提示语
         
         参数:
         - event: 事件对象
@@ -8030,20 +8719,128 @@ class WifePlugin(Star):
         if doom_result is None:
             key = (today, uid)
             doom_result = self.doom_dice_results.pop(key, None)
+        # 获取【厄兆】事件提示语
+        key = (today, uid)
+        omen_message = self.doom_omen_messages.pop(key, None)
+        
         if doom_result:
             prefix = f"【{doom_result}】"
             message = f"{prefix}{message}"
+            # 如果有【厄兆】事件提示语，添加到消息中
+            if omen_message:
+                message = f"{message}\n{omen_message}"
         return event.plain_result(message)
     
     def _get_doom_dice_result(self, today: str, uid: str) -> str:
         """
         获取并清除大凶骰子结果
         返回 "大吉"、"大凶" 或 None
+        注意：此方法只返回大凶骰子结果，不返回【厄兆】事件提示语
         """
         key = (today, uid)
         return self.doom_dice_results.pop(key, None)
     
-    def _draw_item_by_quality(self, today: str, uid: str, count: int = 1, exclude_items: set = None, cfg: dict = None) -> list:
+    def _get_doom_omen_message(self, today: str, uid: str) -> str:
+        """
+        获取并清除【厄兆】事件提示语
+        返回提示语字符串或 None
+        """
+        key = (today, uid)
+        return self.doom_omen_messages.pop(key, None)
+    
+    def _record_user_interaction(self, today: str, gid: str, uid: str, target_uid: str):
+        """
+        记录用户交互关系：uid对target_uid使用过指令或道具
+        
+        参数:
+        - today: 日期
+        - gid: 群ID
+        - uid: 使用者ID
+        - target_uid: 目标用户ID
+        """
+        if not target_uid or uid == target_uid:
+            return
+        uid_str = str(uid)
+        target_uid_str = str(target_uid)
+        gid_str = str(gid)
+        # 使用全局的user_interactions字典，格式：{date: {gid: {target_uid: [uid1, uid2, ...]}}}
+        if today not in user_interactions:
+            user_interactions[today] = {}
+        if gid_str not in user_interactions[today]:
+            user_interactions[today][gid_str] = {}
+        if target_uid_str not in user_interactions[today][gid_str]:
+            user_interactions[today][gid_str][target_uid_str] = []
+        # 如果uid不在列表中，则添加
+        if uid_str not in user_interactions[today][gid_str][target_uid_str]:
+            user_interactions[today][gid_str][target_uid_str].append(uid_str)
+            save_user_interactions()
+    
+    def _get_interacting_users(self, today: str, gid: str, target_uid: str) -> set[str]:
+        """
+        获取对目标用户使用过指令或道具的用户集合
+        
+        参数:
+        - today: 日期
+        - gid: 群ID
+        - target_uid: 目标用户ID
+        
+        返回: 用户ID集合
+        """
+        target_uid_str = str(target_uid)
+        gid_str = str(gid)
+        # 从全局的user_interactions字典读取
+        if today in user_interactions and gid_str in user_interactions[today]:
+            if target_uid_str in user_interactions[today][gid_str]:
+                return set(user_interactions[today][gid_str][target_uid_str])
+        return set()
+    
+    def _trigger_omen_event(self, today: str, uid: str, gid: str, omen_type: str, omen_message: str, omen_handler):
+        """
+        触发【厄兆】事件，如果用户有奇迹于你状态，则优先转移给对自己使用过指令或道具的群友
+        
+        参数:
+        - today: 日期
+        - uid: 用户ID
+        - gid: 群ID
+        - omen_type: 厄兆事件类型（用于识别）
+        - omen_message: 厄兆事件提示语
+        - omen_handler: 处理厄兆事件的函数，接受(today, target_uid, gid)参数
+        """
+        # 检查是否有奇迹于你状态
+        if get_user_flag(today, uid, "omen_pioneer"):
+            # 获取群内所有其他用户（排除自己）
+            cfg = load_group_config(gid)
+            others = [str(u) for u in cfg.keys() if u != uid]
+            if others:
+                # 获取对自己使用过指令或道具的用户集合
+                interacting_users = self._get_interacting_users(today, gid, uid)
+                # 优先选择对自己使用过指令或道具的群友
+                preferred_targets = [u for u in others if u in interacting_users]
+                if preferred_targets:
+                    # 从优先目标中随机选择
+                    target_uid = random.choice(preferred_targets)
+                else:
+                    # 如果没有优先目标，从所有群友中随机选择
+                    target_uid = random.choice(others)
+                target_info = cfg.get(target_uid, {})
+                target_nick = target_info.get("nick", f"用户{target_uid}") if isinstance(target_info, dict) else f"用户{target_uid}"
+                # 让目标承担厄兆事件
+                omen_handler(today, target_uid, gid)
+                # 存储厄兆事件提示语（给原用户）
+                key = (today, uid)
+                self.doom_omen_messages[key] = f"【厄兆】{omen_message}（奇迹于你：已转移给{target_nick}）"
+            else:
+                # 没有其他群友，自己承担
+                omen_handler(today, uid, gid)
+                key = (today, uid)
+                self.doom_omen_messages[key] = f"【厄兆】{omen_message}"
+        else:
+            # 没有奇迹于你状态，自己承担
+            omen_handler(today, uid, gid)
+            key = (today, uid)
+            self.doom_omen_messages[key] = f"【厄兆】{omen_message}"
+    
+    def _draw_item_by_quality(self, today: str, uid: str, count: int = 1, exclude_items: set = None, cfg: dict = None, gid: str = None) -> list:
         """
         按品质概率抽取道具卡
         
@@ -8053,6 +8850,7 @@ class WifePlugin(Star):
         - count: 抽取数量
         - exclude_items: 要排除的道具集合（用于状态道具不可重复等场景）
         - cfg: 群配置字典（可选，用于计算王的运势）
+        - gid: 群ID（可选，用于大凶骰子掷出大凶时清空老婆或道具卡）
         
         返回: 抽取的道具列表
         """
@@ -8069,7 +8867,7 @@ class WifePlugin(Star):
                 quality_pools[quality].append(item)
         
         # 计算各品质的基础概率
-        base_quality_probs = {2: 0.40, 3: 0.25, 4: 0.20, 5: 0.15}
+        base_quality_probs = {2: 0.45, 3: 0.30, 4: 0.15, 5: 0.10}
         
         # 计算调整后的品质概率（使用统一概率计算逻辑）
         probs = {}
