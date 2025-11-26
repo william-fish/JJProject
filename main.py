@@ -1396,6 +1396,7 @@ def get_user_effects(today: str, uid: str) -> dict:
                 "stacking_tower": False,  # 叠叠乐
                 "do_whatever": False,  # 为所欲为
                 "go_fan": False,  # go批
+                "xianchong": False,  # 管人痴
                 "magic_circuit": False,  # 魔术回路
                 "riddler": False,  # 谜语人
                 "royal_bloodline": False,  # 王室血统
@@ -2046,6 +2047,7 @@ class WifePlugin(Star):
             "高利贷",
             "催眠",
             "左脚绊右脚",
+            "管人痴",
         ]
         # 道具品质配置：quality值范围1-5，1为最低品质，5为最高品质
         self.item_quality = {
@@ -2112,6 +2114,7 @@ class WifePlugin(Star):
             "谁问你了": 5,
             "接盘侠": 4,
             "月老": 3,
+            "管人痴": 2,
             "转转回收": 4,
             "王车易位": 5,
             "其人之道": 4,
@@ -2330,9 +2333,16 @@ class WifePlugin(Star):
             {
                 "id": "go_fan",
                 "label": "go批",
-                "desc": "go批：你今日抽老婆或换老婆只会抽到关键词包含「BanG Dream」的角色",
+                "desc": "go批：你今日抽老婆或换老婆只会抽到「BanG Dream」的角色",
                 "item_name": "都来看mygo",
                 "checker": flag_checker("go_fan"),
+            },
+            {
+                "id": "xianchong",
+                "label": "管人痴",
+                "desc": "管人痴：今天你抽老婆或换老婆只会抽到「Vtuber」的角色",
+                "item_name": "管人痴",
+                "checker": flag_checker("xianchong"),
             },
             {
                 "id": "magic_circuit",
@@ -3223,7 +3233,11 @@ class WifePlugin(Star):
         save_item_data()
         return rewards
 
-    def _choose_random_wife_image(self):
+    def _choose_random_wife_image(self, filter_func=None):
+        """
+        随机选择一个老婆图片
+        filter_func: 可选的过滤函数，用于过滤图片列表
+        """
         try:
             candidates = [
                 f for f in os.listdir(IMG_DIR)
@@ -3233,6 +3247,11 @@ class WifePlugin(Star):
             candidates = []
         if not candidates:
             return None
+        # 如果提供了过滤函数，应用过滤
+        if filter_func:
+            candidates = [img for img in candidates if filter_func(img)]
+            if not candidates:
+                return None
         return random.choice(candidates)
 
     def get_item_quality(self, item_name: str) -> int:
@@ -3324,9 +3343,14 @@ class WifePlugin(Star):
         else:
             nick = f"用户{uid}"
         is_harem = get_user_flag(today, uid, "harem")
+        # 检查管人痴状态：如果用户有管人痴状态，只选择包含"Vtuber"的角色
+        xianchong = get_user_flag(today, uid, "xianchong")
+        filter_func = None
+        if xianchong:
+            filter_func = lambda img: "Vtuber" in img or "vtuber" in img.lower()
         granted_wives = []
         for _ in range(reward_count):
-            img = self._choose_random_wife_image()
+            img = self._choose_random_wife_image(filter_func=filter_func)
             if not img:
                 break
             if add_wife(cfg, uid, img, today, nick, is_harem):
@@ -5104,13 +5128,18 @@ class WifePlugin(Star):
                 # 例如：double_factor=2（二度寝），maximize_factor=3（3张同名卡），最终倍数 = 2 + (3-1) = 4
                 double_factor = double_factor + (maximize_factor - 1)
 
-        async def finalize(success_flag: bool, message: str | None):
+        # 跟踪是否实际应用了翻倍效果（用于决定是否消耗二度寝状态）
+        double_effect_applied = False
+
+        async def finalize(success_flag: bool, message: str | None, *, double_effect_used: bool = False):
+            # 只有在实际应用了翻倍效果时才消耗二度寝状态
             if (
                 consume_double_effect
                 and use_double_effect
                 and not is_sleep_effect
                 and double_active
                 and success_flag
+                and double_effect_used
             ):
                 set_user_flag(today, uid, "double_item_effect", False)
             # 检查是否有大凶骰子结果需要添加到消息前缀
@@ -5224,7 +5253,7 @@ class WifePlugin(Star):
                 add_user_mod(today, uid, "ntr_extra_uses", base_total)
             save_effects()
             result = f"牛魔王发动！今日牛成功率UP，牛老婆次数翻倍，但你的老婆也更容易被牛走......"
-            return await finalize(True, result)
+            return await finalize(True, result, double_effect_used=double_active and double_factor > 1)
         # ② 开后宫：无法使用换老婆和重置指令，支持多老婆，有修罗场风险
         if name == "开后宫":
             set_user_flag(today, uid, "harem", True)
@@ -5234,7 +5263,7 @@ class WifePlugin(Star):
             set_user_meta(today, uid, "harem_chaos_multiplier", float(double_factor))
             save_group_config(cfg)
             result = f"你开启了后宫模式！今日无法使用换老婆和重置指令，可同时拥有多个老婆，但小心修罗场哦~"
-            return await finalize(True, result)
+            return await finalize(True, result, double_effect_used=double_active and double_factor > 1)
         # ③ 贤者时间：清空当日前已生效效果，并禁止使用道具
         if name == "贤者时间":
             eff = get_user_effects(today, uid)
@@ -5295,7 +5324,7 @@ class WifePlugin(Star):
             set_user_meta(today, uid, "competition_target", target_uid)
             set_user_meta(today, uid, "competition_prob", clamp_probability(0.35 * double_factor))
             result = f"你向对方发起了雄竞！今日抽老婆有概率抽到与其相同的老婆。"
-            return await finalize(True, result)
+            return await finalize(True, result, double_effect_used=double_active and double_factor > 1)
         if name == "苦主":
             set_user_flag(today, uid, "victim_auto_ntr", True)
             set_user_meta(today, uid, "ntr_penalty_stack", 0)
@@ -5315,7 +5344,7 @@ class WifePlugin(Star):
                 bonus_count = bonus_count * 2
             # 增加牛老婆的额外使用次数，而不是修改records的count
             add_user_mod(today, uid, "ntr_extra_uses", bonus_count)
-            return await finalize(True, f"黄毛觉醒！下次牛老婆必定成功，已将今日已使用的「换老婆」次数累加到「牛老婆」次数，但代价是......")
+            return await finalize(True, f"黄毛觉醒！下次牛老婆必定成功，已将今日已使用的「换老婆」次数累加到「牛老婆」次数，但代价是......", double_effect_used=double_active and double_factor > 1)
         if name == "吃一堑":
             set_user_flag(today, uid, "learned", True)
             return await finalize(True, f"吃一堑长一智：你变得聪明了。")
@@ -5602,6 +5631,7 @@ class WifePlugin(Star):
                     "stacking_tower": False,
                     "do_whatever": False,
                     "go_fan": False,
+                    "xianchong": False,
                     "magic_circuit": False,
                     "riddler": False,
                 },
@@ -5652,11 +5682,11 @@ class WifePlugin(Star):
             msg = f"你成为了富哥，今日额外获得2次老婆集市购买机会{target_nick_info}。"
             if cupid_msg:
                 msg = f"{msg}\n{cupid_msg}"
-            return await finalize(True, msg)
+            return await finalize(True, msg, double_effect_used=double_active and double_factor > 1)
         if name == "疯狂星期四":
             # 额外获得一次只能购买老婆的集市次数
             add_user_mod(today, uid, "market_wife_extra_purchases", 1 * double_factor)
-            return await finalize(True, f"疯狂星期四来啦！你额外获得1次只能购买老婆的集市机会。")
+            return await finalize(True, f"疯狂星期四来啦！你额外获得1次只能购买老婆的集市机会。", double_effect_used=double_active and double_factor > 1)
         if name == "硬凹":
             # 获得2次重置盲盒机会（考虑二度寝翻倍效果）
             add_user_mod(today, uid, "reset_blind_box_extra", 2 * double_factor)
@@ -5667,7 +5697,7 @@ class WifePlugin(Star):
             if used > max_reset_blind_box:
                 day_record[uid] = max_reset_blind_box
                 save_reset_blind_box_records()
-            return await finalize(True, f"你就凹吧，你获得了{2 * double_factor}次重置盲盒机会。")
+            return await finalize(True, f"你就凹吧，你获得了{2 * double_factor}次重置盲盒机会。", double_effect_used=double_active and double_factor > 1)
         if name == "好人卡":
             if not target_uid:
                 return await finalize(False, f"使用「好人卡」时请@目标用户哦~")
@@ -5677,19 +5707,20 @@ class WifePlugin(Star):
             if get_user_flag(today, target_uid, "ban_items"):
                 return await finalize(False, f"对方正处于贤者时间，无法接收道具。")
             
-            # 给目标添加一张随机道具卡
-            drawn = self._draw_item_by_quality(today, target_uid, count=1, cfg=cfg, gid=gid)
+            # 给目标添加随机道具卡（应用翻倍效果）
+            drawn = self._draw_item_by_quality(today, target_uid, count=1 * double_factor, cfg=cfg, gid=gid)
             if not drawn:
                 return await finalize(False, f"未能为目标生成道具卡。")
-            new_card = drawn[0]
             today_items = item_data.setdefault(today, {})
             target_items = today_items.setdefault(target_uid, [])
-            target_items.append(new_card)
+            for new_card in drawn:
+                target_items.append(new_card)
             save_item_data()
             
             target_info = cfg.get(target_uid, {})
             target_nick = target_info.get("nick", f"用户{target_uid}") if isinstance(target_info, dict) else f"用户{target_uid}"
-            return await finalize(True, f"你给{target_nick}发了一张好人卡，{target_nick}获得了「{new_card}」。")
+            cards_text = "、".join([f"「{card}」" for card in drawn])
+            return await finalize(True, f"你给{target_nick}发了一张好人卡，{target_nick}获得了{cards_text}。", double_effect_used=double_active and double_factor > 1)
         if name == "丘比特":
             # 获得2张好人卡
             today_items = item_data.setdefault(today, {})
@@ -5699,7 +5730,7 @@ class WifePlugin(Star):
             save_item_data()
             # 获得"爱神"状态
             set_user_flag(today, uid, "cupid", True)
-            return await finalize(True, f"爱神降临！你获得了{2 * double_factor}张「好人卡」，并获得了「爱神」状态。")
+            return await finalize(True, f"爱神降临！你获得了{2 * double_factor}张「好人卡」，并获得了「爱神」状态。", double_effect_used=double_active and double_factor > 1)
         if name == "高雅人士":
             # 获得"品鉴中"状态
             set_user_flag(today, uid, "tasting", True)
@@ -6232,7 +6263,13 @@ class WifePlugin(Star):
 
             effect_key = random.choice(list(heyimi_effects.keys()))
             success, message, _ = await heyimi_effects[effect_key]()
-            return await finalize(success, message)
+            # 检查选中的效果是否使用了double_factor
+            effects_using_double = {
+                "mute_300", "double_counter", "change_free_half", "change_fail_half",
+                "random_item", "draw_chance", "two_items"
+            }
+            double_effect_used = (effect_key in effects_using_double and double_active and double_factor > 1)
+            return await finalize(success, message, double_effect_used=double_effect_used)
         # 新增道具卡效果
         if name == "二度寝":
             set_user_flag(today, uid, "double_item_effect", True)
@@ -6240,7 +6277,7 @@ class WifePlugin(Star):
         # ① 白月光：今天获得一次"选老婆"的使用次数
         if name == "白月光":
             add_user_mod(today, uid, "select_wife_uses", 1 * double_factor)
-            return await finalize(True, f"你获得了{1 * double_factor}次「选老婆」的使用次数。")
+            return await finalize(True, f"你获得了{1 * double_factor}次「选老婆」的使用次数。", double_effect_used=double_active and double_factor > 1)
         # ② 公交车：今天你对其他人使用"交换老婆"指令时无需经过对方同意，强制交换，但你今天无法使用"牛老婆"指令
         if name == "公交车":
             set_user_flag(today, uid, "force_swap", True)
@@ -6382,6 +6419,10 @@ class WifePlugin(Star):
             # 设置原批状态
             set_user_flag(today, uid, "yuanpi", True)
             return await finalize(True, f"原来你也......")
+        if name == "管人痴":
+            # 设置管人痴状态
+            set_user_flag(today, uid, "xianchong", True)
+            return await finalize(True, f"你获得了「管人痴」状态，今天抽老婆或换老婆只会抽到「Vtuber」的角色。")
         if name == "夏日重现":
             # 先确保今日效果已初始化，避免遗漏信息
             get_user_effects(today, uid)
@@ -6972,6 +7013,9 @@ class WifePlugin(Star):
         go_fan = get_user_flag(today, uid, "go_fan")
         if go_fan:
             status_filters.append(lambda img: "bang dream" in img.lower())
+        xianchong = get_user_flag(today, uid, "xianchong")
+        if xianchong:
+            status_filters.append(lambda img: "Vtuber" in img or "vtuber" in img.lower())
         
         # 如果有多个状态过滤条件，使用OR逻辑
         if len(status_filters) > 1:
@@ -6984,6 +7028,8 @@ class WifePlugin(Star):
                     status_names.append("原批")
                 if go_fan:
                     status_names.append("go批")
+                if xianchong:
+                    status_names.append("管人痴")
                 yield event.plain_result(f"抱歉，在同时拥有{'+'.join(status_names)}状态的情况下，没有找到满足条件的角色，请稍后再试~")
                 return
             image_pool = filtered_pool
@@ -6993,11 +7039,13 @@ class WifePlugin(Star):
             image_pool = [img_name for img_name in image_pool if filter_func(img_name)]
             if not image_pool:
                 if hermes:
-                    yield event.plain_result("抱歉，没有找到包含「赛马娘」关键词的角色，请稍后再试~")
+                    yield event.plain_result("抱歉，没有找到「赛马娘」的角色，请稍后再试~")
                 elif yuanpi:
-                    yield event.plain_result("抱歉，没有找到包含「原神」关键词的角色，请稍后再试~")
+                    yield event.plain_result("抱歉，没有找到「原神」的角色，请稍后再试~")
                 elif go_fan:
-                    yield event.plain_result("go批状态下没有找到包含「BanG Dream」关键词的角色，请稍后再试~")
+                    yield event.plain_result("go批状态下没有找到「BanG Dream」的角色，请稍后再试~")
+                elif xianchong:
+                    yield event.plain_result("管人痴状态下没有找到「Vtuber」的角色，请稍后再试~")
                 return
 
         if user_keywords:
@@ -8029,8 +8077,18 @@ class WifePlugin(Star):
             except:
                 yield event.plain_result("抱歉，今天的老婆获取失败了，请稍后再试~")
                 return
+        # 检查管人痴状态：如果用户有管人痴状态，只保留包含"Vtuber"的角色
+        xianchong = get_user_flag(today, uid, "xianchong")
+        if xianchong:
+            filtered_imgs = [
+                img_name for img_name in filtered_imgs
+                if "Vtuber" in img_name or "vtuber" in img_name.lower()
+            ]
         if not filtered_imgs:
-            yield event.plain_result(f"没有找到包含「{keyword}」的老婆，换个关键词试试吧~")
+            if xianchong:
+                yield event.plain_result(f"管人痴状态下，没有找到同时「{keyword}」和「Vtuber」的老婆，换个关键词试试吧~")
+            else:
+                yield event.plain_result(f"没有找到「{keyword}」的老婆，换个关键词试试吧~")
             return
         # 随机选择一个
         img = random.choice(filtered_imgs)
