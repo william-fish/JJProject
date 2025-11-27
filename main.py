@@ -1,5 +1,6 @@
 from astrbot.api.all import *
 from astrbot.api.star import StarTools
+from astrbot.api.event import MessageChain
 from datetime import datetime, timedelta
 import random
 import os
@@ -3470,14 +3471,70 @@ class WifePlugin(Star):
         if timeout_task:
             timeout_task.cancel()
         session["deadline_ts"] = datetime.utcnow().timestamp() + 60
-        session["timeout_task"] = asyncio.create_task(
-            self._check_recognize_timeout(event, session_key, question_index, question)
+        loop = asyncio.get_running_loop()
+
+        def timeout_callback():
+            asyncio.create_task(
+                self._check_recognize_timeout(event, session_key, question_index, question)
+            )
+
+        handle = loop.call_later(60, timeout_callback)
+        session["timeout_task"] = handle
+
+    async def _process_recognize_timeout(self, event: AstrMessageEvent, session_key: tuple[str, str], question_index: int, question: dict) -> bool:
+        session = self.recognize_sessions.get(session_key)
+        if not session:
+            return False
+        if session.get("current_index") != question_index:
+            return False
+        if not session.get("awaiting_answer"):
+            return False
+        session["awaiting_answer"] = False
+        self._cancel_recognize_timeout(session)
+        session["no_at_count"] = 0
+        source_name = question.get("source_name", "")
+        if source_name:
+            answer_text = f"来自《{source_name}》的{question['display_name']}"
+        else:
+            answer_text = question["display_name"]
+        await self._send_plain_message(
+            event, f"可惜超时了（60秒），正确答案：{answer_text}", session.get("uid")
         )
+        session["current_index"] += 1
+        today = get_today()
+        if session["current_index"] >= len(session.get("questions", [])):
+            self.recognize_sessions.pop(session_key, None)
+            uid = session["uid"]
+            set_user_meta(today, uid, "recognize_wife_played", True)
+            reward_msg = self._finalize_recognize_rewards(today, uid, session["correct"])
+            await self._send_plain_message(event, reward_msg, session["uid"])
+        else:
+            await self._send_recognize_question_direct(event, session_key, session)
+        return True
+
+    async def _maybe_force_recognize_timeout(self, event: AstrMessageEvent, session_key: tuple[str, str], session: dict) -> bool:
+        if not session.get("awaiting_answer"):
+            return False
+        deadline_ts = session.get("deadline_ts")
+        if not deadline_ts:
+            return False
+        if datetime.utcnow().timestamp() < deadline_ts:
+            return False
+        idx = session.get("current_index", 0)
+        questions = session.get("questions", [])
+        if idx >= len(questions):
+            return False
+        question = questions[idx]
+        await self._process_recognize_timeout(event, session_key, idx, question)
+        return True
 
     def _cancel_recognize_timeout(self, session: dict):
         timeout_task = session.get("timeout_task")
         if timeout_task:
-            timeout_task.cancel()
+            try:
+                timeout_task.cancel()
+            except Exception:
+                pass
         session["timeout_task"] = None
         session["deadline_ts"] = None
 
@@ -3502,14 +3559,64 @@ class WifePlugin(Star):
         return event.message_str.strip()
 
     async def _send_group_message(self, event: AstrMessageEvent, chain: list):
+        if event:
+            bot = getattr(event, "bot", None)
+            group_id = getattr(getattr(event, "message_obj", None), "group_id", None)
+            if bot and group_id:
+                try:
+                    await bot.send_group_message(group_id=int(group_id), message=chain)
+                    return
+                except Exception:
+                    pass
+        await self._send_message_via_context(event, chain)
+
+    async def _send_message_via_context(self, event: AstrMessageEvent, chain: list):
+        session_id = self._derive_session_id(event)
+        if not session_id or not self.context:
+            return
         try:
-            gid = int(event.message_obj.group_id)
-            await event.bot.send_group_message(group_id=gid, message=chain)
+            message_chain = MessageChain(chain)
+            await self.context.send_message(session_id, message_chain)
         except Exception:
             pass
 
-    async def _send_plain_message(self, event: AstrMessageEvent, text: str):
-        await self._send_group_message(event, [Plain(text)])
+    def _derive_session_id(self, event: AstrMessageEvent):
+        if not event:
+            return None
+        session_id = getattr(event, "unified_msg_origin", None)
+        if session_id:
+            return session_id
+        platform_name = None
+        group_id = None
+        sender_id = None
+        if hasattr(event, "get_platform_name"):
+            platform_name = event.get_platform_name()
+        if hasattr(event, "get_group_id"):
+            group_id = event.get_group_id()
+        if hasattr(event, "get_sender_id"):
+            sender_id = event.get_sender_id()
+        if group_id:
+            platform_name = platform_name or getattr(
+                getattr(event, "message_obj", None), "platform", None
+            )
+            if platform_name:
+                return f"{platform_name}_group_{group_id}"
+            return str(group_id)
+        if sender_id:
+            platform_name = platform_name or getattr(
+                getattr(event, "message_obj", None), "platform", None
+            )
+            if platform_name:
+                return f"{platform_name}_private_{sender_id}"
+            return str(sender_id)
+        return None
+
+    async def _send_plain_message(self, event: AstrMessageEvent, text: str, at_uid: str | None = None):
+        components = []
+        if at_uid:
+            components.append(At(qq=int(at_uid)))
+        components.append(Plain(text))
+        await self._send_group_message(event, components)
 
     async def _send_recognize_question_direct(self, event: AstrMessageEvent, session_key: tuple[str, str], session: dict):
         idx = session.get("current_index", 0)
@@ -3844,9 +3951,14 @@ class WifePlugin(Star):
                 self._cancel_recognize_timeout(session)
                 self.recognize_sessions.pop(session_key, None)
             else:
-                async for res in self._handle_recognize_answer(event, session_key):
-                    yield res
-                return
+                forced = await self._maybe_force_recognize_timeout(event, session_key, session)
+                if forced:
+                    return
+                session = self.recognize_sessions.get(session_key)
+                if session and session.get("awaiting_answer"):
+                    async for res in self._handle_recognize_answer(event, session_key):
+                        yield res
+                    return
         text = event.message_str.strip()
         cmd_executed = False
         for cmd, func in self.commands.items():
@@ -3904,33 +4016,7 @@ class WifePlugin(Star):
         self._schedule_recognize_timeout(event, session_key, idx, question)
 
     async def _check_recognize_timeout(self, event: AstrMessageEvent, session_key: tuple[str, str], question_index: int, question: dict):
-        await asyncio.sleep(60)
-        session = self.recognize_sessions.get(session_key)
-        if not session:
-            return
-        if session.get("current_index") != question_index:
-            return
-        if not session.get("awaiting_answer"):
-            return
-        session["awaiting_answer"] = False
-        self._cancel_recognize_timeout(session)
-        session["no_at_count"] = 0
-        source_name = question.get("source_name", "")
-        if source_name:
-            answer_text = f"来自《{source_name}》的{question['display_name']}"
-        else:
-            answer_text = question["display_name"]
-        await self._send_plain_message(event, f"可惜超时了（60秒），正确答案：{answer_text}")
-        session["current_index"] += 1
-        today = get_today()
-        if session["current_index"] >= len(session.get("questions", [])):
-            self.recognize_sessions.pop(session_key, None)
-            uid = session["uid"]
-            set_user_meta(today, uid, "recognize_wife_played", True)
-            reward_msg = self._finalize_recognize_rewards(today, uid, session["correct"])
-            await self._send_plain_message(event, reward_msg)
-        else:
-            await self._send_recognize_question_direct(event, session_key, session)
+        await self._process_recognize_timeout(event, session_key, question_index, question)
 
     async def _handle_recognize_answer(self, event: AstrMessageEvent, session_key: tuple[str, str]):
         session = self.recognize_sessions.get(session_key)
@@ -3969,14 +4055,14 @@ class WifePlugin(Star):
             answer_text = f"来自《{source_name}》的{question['display_name']}"
         else:
             answer_text = question["display_name"]
-        yield event.plain_result(f"{verdict} 正确答案：{answer_text}")
+        yield event.chain_result([At(qq=int(session["uid"])), Plain(f"{verdict} 正确答案：{answer_text}")])
         session["current_index"] += 1
         if session["current_index"] >= len(questions):
             self.recognize_sessions.pop(session_key, None)
             uid = session["uid"]
             set_user_meta(today, uid, "recognize_wife_played", True)
             reward_msg = self._finalize_recognize_rewards(today, uid, session["correct"])
-            yield event.plain_result(reward_msg)
+            yield event.chain_result([At(qq=int(uid)), Plain(reward_msg)])
         else:
             async for res in self._send_recognize_question(event, session_key, session):
                 yield res
