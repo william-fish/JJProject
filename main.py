@@ -1427,6 +1427,7 @@ def get_user_effects(today: str, uid: str) -> dict:
                 "ban_items_expire_ts": None,  # 道具禁用过期时间戳
                 "loan_expire_ts": None,  # 高利贷过期时间戳
                 "loan_item_count": 0,  # 高利贷需要失去的道具数量
+                "zero_attention_expire_ts": None,  # 谁问你了过期时间戳
             },
         }
         day_map[uid] = eff
@@ -1456,6 +1457,16 @@ def get_user_effects(today: str, uid: str) -> dict:
                     meta["loan_expire_ts"] = None
                     meta["loan_item_count"] = 0
                     save_effects()
+    # 检查谁问你了过期
+    zero_attention_expire_ts = meta.get("zero_attention_expire_ts")
+    if zero_attention_expire_ts:
+        now_ts = datetime.utcnow().timestamp()
+        if now_ts >= zero_attention_expire_ts:
+            # 谁问你了状态过期，清除状态
+            if eff["flags"].get("zero_attention"):
+                eff["flags"]["zero_attention"] = False
+                meta["zero_attention_expire_ts"] = None
+                save_effects()
     return eff
 
 
@@ -2286,14 +2297,14 @@ class WifePlugin(Star):
             {
                 "id": "hermes",
                 "label": "爱马仕",
-                "desc": "爱马仕：抽老婆或换老婆只会抽到「赛马娘」的角色",
+                "desc": "爱马仕：抽老婆或换老婆时抽到「赛马娘」的角色概率提升",
                 "item_name": "爱马仕",
                 "checker": flag_checker("hermes"),
             },
             {
                 "id": "yuanpi",
                 "label": "原批",
-                "desc": "原批：今日抽老婆和换老婆只会抽到「原神」的角色",
+                "desc": "原批：抽老婆或换老婆时抽到「原神」的角色概率提升",
                 "item_name": "缘分",
                 "checker": flag_checker("yuanpi"),
             },
@@ -2337,14 +2348,14 @@ class WifePlugin(Star):
             {
                 "id": "go_fan",
                 "label": "go批",
-                "desc": "go批：你今日抽老婆或换老婆只会抽到「BanG Dream」的角色",
+                "desc": "go批：抽老婆或换老婆时抽到「BanG Dream」的角色概率提升",
                 "item_name": "都来看mygo",
                 "checker": flag_checker("go_fan"),
             },
             {
                 "id": "xianchong",
                 "label": "管人痴",
-                "desc": "管人痴：今天你抽老婆或换老婆只会抽到「Vtuber」的角色",
+                "desc": "管人痴：抽老婆或换老婆时抽到「Vtuber」的角色概率提升",
                 "item_name": "管人痴",
                 "checker": flag_checker("xianchong"),
             },
@@ -3505,8 +3516,12 @@ class WifePlugin(Star):
         if session["current_index"] >= len(session.get("questions", [])):
             self.recognize_sessions.pop(session_key, None)
             uid = session["uid"]
-            set_user_meta(today, uid, "recognize_wife_played", True)
-            reward_msg = self._finalize_recognize_rewards(today, uid, session["correct"])
+            reward_claimed = bool(get_user_meta(today, uid, "recognize_wife_reward_claimed", False))
+            reward_msg, reward_granted = self._finalize_recognize_rewards(
+                today, uid, session["correct"], reward_allowed=not reward_claimed
+            )
+            if reward_granted:
+                set_user_meta(today, uid, "recognize_wife_reward_claimed", True)
             await self._send_plain_message(event, reward_msg, session["uid"])
         else:
             await self._send_recognize_question_direct(event, session_key, session)
@@ -3973,8 +3988,10 @@ class WifePlugin(Star):
         gid = str(event.message_obj.group_id)
         uid = str(event.get_sender_id())
         today = get_today()
-        if get_user_meta(today, uid, "recognize_wife_played", False):
-            yield event.plain_result("你今天已经挑战过「认老婆」啦，明天再来吧~")
+        play_count = int(get_user_meta(today, uid, "recognize_wife_play_count", 0) or 0)
+        max_plays = 3
+        if play_count >= max_plays:
+            yield event.plain_result("你今天已经玩过3次「认老婆」啦，明天再来吧~")
             return
         session_key = (gid, uid)
         if session_key in self.recognize_sessions:
@@ -3997,6 +4014,7 @@ class WifePlugin(Star):
             "timeout_task": None,
         }
         self.recognize_sessions[session_key] = session
+        set_user_meta(today, uid, "recognize_wife_play_count", play_count + 1)
         yield event.plain_result("认老婆挑战开始！根据图片回复角色名字，共3题，准备好了就直接作答吧~")
         async for res in self._send_recognize_question(event, session_key, session):
             yield res
@@ -4055,23 +4073,33 @@ class WifePlugin(Star):
             answer_text = f"来自《{source_name}》的{question['display_name']}"
         else:
             answer_text = question["display_name"]
-        yield event.chain_result([At(qq=int(session["uid"])), Plain(f"{verdict} 正确答案：{answer_text}")])
+        yield event.plain_result(f"{verdict} 正确答案：{answer_text}")
         session["current_index"] += 1
         if session["current_index"] >= len(questions):
             self.recognize_sessions.pop(session_key, None)
             uid = session["uid"]
-            set_user_meta(today, uid, "recognize_wife_played", True)
-            reward_msg = self._finalize_recognize_rewards(today, uid, session["correct"])
+            reward_claimed = bool(get_user_meta(today, uid, "recognize_wife_reward_claimed", False))
+            reward_msg, reward_granted = self._finalize_recognize_rewards(
+                today, uid, session["correct"], reward_allowed=not reward_claimed
+            )
+            if reward_granted:
+                set_user_meta(today, uid, "recognize_wife_reward_claimed", True)
             yield event.chain_result([At(qq=int(uid)), Plain(reward_msg)])
         else:
             async for res in self._send_recognize_question(event, session_key, session):
                 yield res
 
-    def _finalize_recognize_rewards(self, today: str, uid: str, correct_count: int) -> str:
+    def _finalize_recognize_rewards(
+        self, today: str, uid: str, correct_count: int, *, reward_allowed: bool = True
+    ) -> tuple[str, bool]:
         lines = [f"认老婆挑战结束，成绩：{correct_count}/3。"]
+        reward_granted = False
+        if not reward_allowed:
+            lines.append("今日奖励已经领取完毕，本次挑战仅记录成绩~")
+            return "\n".join(lines), reward_granted
         if correct_count <= 0:
-            lines.append("这次没拿到奖励，明天再来挑战吧！")
-            return "\n".join(lines)
+            lines.append("这次没拿到奖励，下次再来挑战吧！")
+            return "\n".join(lines), reward_granted
         if correct_count == 1:
             reward_type = random.choice(["items", "commands", "draw"])
             if reward_type == "items":
@@ -4084,7 +4112,8 @@ class WifePlugin(Star):
                 add_user_mod(today, uid, "blind_box_extra_draw", 1)
                 reward_text = "抽盲盒额外机会 +1"
             lines.append(f"本次奖励：{reward_text}")
-            return "\n".join(lines)
+            reward_granted = True
+            return "\n".join(lines), reward_granted
         if correct_count == 2:
             reward_type = random.choice(["items", "commands", "draw_reset", "legend"])
             if reward_type == "items":
@@ -4101,7 +4130,8 @@ class WifePlugin(Star):
                 legend_items = self._grant_random_items(today, uid, 3, quality=5)
                 reward_text = f"传说道具卡×3：{'、'.join(legend_items)}" if legend_items else "尝试发放传说道具卡但卡池为空。"
             lines.append(f"本次奖励：{reward_text}")
-            return "\n".join(lines)
+            reward_granted = True
+            return "\n".join(lines), reward_granted
         # correct_count == 3
         reward_type = random.choice(["items", "commands", "draw_reset", "legend", "perk"])
         if reward_type == "items":
@@ -4129,7 +4159,8 @@ class WifePlugin(Star):
                 new_value = add_blind_box_perk(uid, "empty_reduction_bonus", 0.04, max_value=0.20)
                 reward_text = f"抽盲盒永久加成：空箱率 -4%（当前-{int(new_value * 100)}%）"
         lines.append(f"本次奖励：{reward_text}")
-        return "\n".join(lines)
+        reward_granted = True
+        return "\n".join(lines), reward_granted
 
     async def draw_item(self, event: AstrMessageEvent):
         # 抽盲盒主逻辑
@@ -4180,9 +4211,13 @@ class WifePlugin(Star):
             # 重新获取user_items（因为已经清空了）
             user_items = today_items.get(uid)
             # 继续执行抽盲盒逻辑，不消耗正常次数
-        elif user_items is not None and len(user_items) > 0 and not allow_extra_draw:
-            yield event.plain_result(f"你今天已经抽过盲盒啦，明天再来吧~")
-            return
+        else:
+            # 检查用户是否真的抽过盲盒（通过blind_box_groups判断，而不是通过user_items判断）
+            # 因为用户可能从集市购买道具或被道具作用过，导致user_items有道具但没抽过盲盒
+            blind_box_groups = get_user_meta(today, uid, "blind_box_groups", [])
+            if blind_box_groups and not allow_extra_draw:
+                yield event.plain_result(f"你今天已经抽过盲盒啦，明天再来吧~")
+                return
         had_items_before = user_items is not None and len(user_items) > 0
         existing_items = list(user_items or [])
         if allow_extra_draw:
@@ -5451,7 +5486,7 @@ class WifePlugin(Star):
                     "选老婆 关键词：消耗专用次数，按关键词从卡池中定向抽老婆",
                     "打老婆：消耗专用次数触发事件，可能失去老婆或获得特殊反馈",
                     "勾引 @目标：消耗或无限使用次数（熊出没）来勾引目标，30%成功，需@目标",
-                    "认老婆：每日一次三连题挑战，根据答对数量获得随机道具、指令次数、盲盒机会、传说道具及永久加成奖励",
+                    "认老婆：每日最多挑战3次，根据答对数量获得随机道具、指令次数、盲盒机会、传说道具及永久加成奖励（奖励仅能领取一次）",
                 ],
             ),
             (
@@ -5573,9 +5608,9 @@ class WifePlugin(Star):
         if card_name in self.items_need_target and not target_uid:
             yield event.plain_result(f"使用「{card_name}」时请@目标哦~")
             return
-        today_items = item_data.get(today, {})
-        user_items = today_items.get(uid)
-        if user_items is None:
+        today_items = item_data.setdefault(today, {})
+        user_items = today_items.setdefault(uid, [])
+        if not user_items:
             yield event.plain_result(f"你今天还没有抽盲盒，暂时没有可用的道具卡~")
             return
         if card_name not in user_items:
@@ -6002,7 +6037,11 @@ class WifePlugin(Star):
             return await finalize(True, f"左右开弓就绪！你每次换老婆后都会随机对群友强制发动一次牛老婆，而且不消耗次数。")
         if name == "谁问你了":
             set_user_flag(today, uid, "zero_attention", True)
-            return await finalize(True, f"0人问你状态生效！今天别人@不到你，悠闲摸鱼去吧。")
+            # 设置3小时过期时间（3小时 = 10800秒）
+            eff = get_user_effects(today, uid)
+            eff["meta"]["zero_attention_expire_ts"] = datetime.utcnow().timestamp() + 10800
+            save_effects()
+            return await finalize(True, f"0人问你状态生效！3小时内别人@不到你，悠闲摸鱼去吧。")
         if name == "接盘侠":
             set_user_flag(today, uid, "cuckold", True)
             set_user_meta(today, uid, "cuckold_group", gid)
@@ -6828,9 +6867,9 @@ class WifePlugin(Star):
 
             async def effect_ban_items():
                 set_user_flag(today, uid, "ban_items", True)
-                set_user_meta(today, uid, "ban_items_expire_ts", datetime.utcnow().timestamp() + 7200)
-                msg = f"何意味？你在接下来的2小时内不能使用道具卡。"
-                return True, msg, "2小时内禁用道具卡"
+                set_user_meta(today, uid, "ban_items_expire_ts", datetime.utcnow().timestamp() + 14400)
+                msg = f"何意味？清空你的所有状态且你在接下来的4小时内不能使用道具卡。"
+                return True, msg, "4小时内禁用道具卡"
 
             async def effect_lose_all_items():
                 today_items = item_data.setdefault(today, {})
@@ -7659,49 +7698,51 @@ class WifePlugin(Star):
                 yield event.plain_result("抱歉，今天的老婆获取失败了，请稍后再试~")
                 return
 
+        # 修改：所有只抽到指定关键词角色的道具改为50%概率，而不是必定
         # 修复BUG：当同时拥有多个状态时，使用OR逻辑（满足任一条件即可），避免过滤后列表为空
         status_filters = []
+        status_names = []
         if hermes:
             status_filters.append(lambda img: "赛马娘" in img)
+            status_names.append("爱马仕")
         if yuanpi:
             status_filters.append(lambda img: "原神" in img)
+            status_names.append("原批")
         go_fan = get_user_flag(today, uid, "go_fan")
         if go_fan:
             status_filters.append(lambda img: "bang dream" in img.lower())
+            status_names.append("go批")
         xianchong = get_user_flag(today, uid, "xianchong")
         if xianchong:
             status_filters.append(lambda img: "Vtuber" in img or "vtuber" in img.lower())
+            status_names.append("管人痴")
         
-        # 如果有多个状态过滤条件，使用OR逻辑
-        if len(status_filters) > 1:
-            filtered_pool = [img_name for img_name in image_pool if any(f(img_name) for f in status_filters)]
-            if not filtered_pool:
-                status_names = []
-                if hermes:
-                    status_names.append("爱马仕")
-                if yuanpi:
-                    status_names.append("原批")
-                if go_fan:
-                    status_names.append("go批")
-                if xianchong:
-                    status_names.append("管人痴")
-                yield event.plain_result(f"抱歉，在同时拥有{'+'.join(status_names)}状态的情况下，没有找到满足条件的角色，请稍后再试~")
-                return
-            image_pool = filtered_pool
-        elif len(status_filters) == 1:
-            # 只有一个状态时，直接应用过滤
-            filter_func = status_filters[0]
-            image_pool = [img_name for img_name in image_pool if filter_func(img_name)]
-            if not image_pool:
-                if hermes:
-                    yield event.plain_result("抱歉，没有找到「赛马娘」的角色，请稍后再试~")
-                elif yuanpi:
-                    yield event.plain_result("抱歉，没有找到「原神」的角色，请稍后再试~")
-                elif go_fan:
-                    yield event.plain_result("go批状态下没有找到「BanG Dream」的角色，请稍后再试~")
-                elif xianchong:
-                    yield event.plain_result("管人痴状态下没有找到「Vtuber」的角色，请稍后再试~")
-                return
+        # 如果有状态过滤条件，50%概率应用过滤（固定概率，不受BUFF影响）
+        if status_filters:
+            should_filter = random.random() < 0.5
+            if should_filter:
+                # 如果有多个状态过滤条件，使用OR逻辑
+                if len(status_filters) > 1:
+                    filtered_pool = [img_name for img_name in image_pool if any(f(img_name) for f in status_filters)]
+                    if not filtered_pool:
+                        yield event.plain_result(f"抱歉，在同时拥有{'+'.join(status_names)}状态的情况下，没有找到满足条件的角色，请稍后再试~")
+                        return
+                    image_pool = filtered_pool
+                elif len(status_filters) == 1:
+                    # 只有一个状态时，直接应用过滤
+                    filter_func = status_filters[0]
+                    filtered_pool = [img_name for img_name in image_pool if filter_func(img_name)]
+                    if not filtered_pool:
+                        if hermes:
+                            yield event.plain_result("抱歉，没有找到「赛马娘」的角色，请稍后再试~")
+                        elif yuanpi:
+                            yield event.plain_result("抱歉，没有找到「原神」的角色，请稍后再试~")
+                        elif go_fan:
+                            yield event.plain_result("go批状态下没有找到「BanG Dream」的角色，请稍后再试~")
+                        elif xianchong:
+                            yield event.plain_result("管人痴状态下没有找到「Vtuber」的角色，请稍后再试~")
+                        return
+                    image_pool = filtered_pool
 
         if user_keywords:
             keywords_lower = [kw.lower() for kw in user_keywords]
@@ -7729,9 +7770,9 @@ class WifePlugin(Star):
                 if "competition_prob" in eff["meta"]:
                     del eff["meta"]["competition_prob"]
                 save_effects()
-        # 检查棍勇状态：35%概率抽到关键词包含"回复术士的重启人生"的老婆
+        # 检查棍勇状态：50%概率抽到关键词包含"回复术士的重启人生"的老婆（固定概率，不受BUFF影响）
         stick_hero = get_user_flag(today, uid, "stick_hero")
-        if stick_hero and self._probability_check(0.35, today, uid, positive=True):
+        if stick_hero and random.random() < 0.5:
             stick_hero_wives = get_user_meta(today, uid, "stick_hero_wives", [])
             if not isinstance(stick_hero_wives, list):
                 stick_hero_wives = []
@@ -7762,9 +7803,9 @@ class WifePlugin(Star):
                 # 记录已获得的老婆
                 stick_hero_wives.append(img)
                 set_user_meta(today, uid, "stick_hero_wives", stick_hero_wives)
-        # 检查未来日记：强制抽到指定关键词的老婆
+        # 检查未来日记：50%概率抽到指定关键词的老婆（固定概率，不受BUFF影响）
         future_diary_target = get_user_meta(today, uid, "future_diary_target", None)
-        if future_diary_target:
+        if future_diary_target and random.random() < 0.5:
             # 获取所有图片列表
             try:
                 if os.path.exists(IMG_DIR):
@@ -8771,9 +8812,9 @@ class WifePlugin(Star):
             except:
                 yield event.plain_result("抱歉，今天的老婆获取失败了，请稍后再试~")
                 return
-        # 检查管人痴状态：如果用户有管人痴状态，只保留包含"Vtuber"的角色
+        # 检查管人痴状态：50%概率只保留包含"Vtuber"的角色（固定概率，不受BUFF影响）
         xianchong = get_user_flag(today, uid, "xianchong")
-        if xianchong:
+        if xianchong and random.random() < 0.5:
             filtered_imgs = [
                 img_name for img_name in filtered_imgs
                 if "Vtuber" in img_name or "vtuber" in img_name.lower()
