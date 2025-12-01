@@ -2358,8 +2358,8 @@ class WifePlugin(Star):
             },
             {
                 "id": "fortune_linked",
-                "label": "福祸相依",
-                "desc": "福祸相依：今日失去老婆时会获得同数量的随机道具卡，失去道具卡时会获得同数量的新老婆（使用道具或换老婆不视为失去）",
+                "label": "祸福相依",
+                "desc": "祸福相依：今日失去老婆时会获得同数量的随机道具卡，失去道具卡时会获得同数量的新老婆（使用道具或换老婆不视为失去）",
                 "item_name": "塞翁失马",
                 "checker": flag_checker("fortune_linked"),
             },
@@ -3195,7 +3195,7 @@ class WifePlugin(Star):
         cancel_msg = await self.cancel_swap_on_wife_change(gid, [uid, target_uid])
         messages = [f"左右开弓发动！随机对{target_nick}使用了一次牛老婆，成功抢走「{display_name}」。"]
         if fortune_msg:
-            messages.append(f"{target_nick}{fortune_msg.replace('福祸相依：', '的福祸相依：')}")
+            messages.append(f"{target_nick}{fortune_msg.replace('祸福相依：', '的祸福相依：')}")
         if cancel_msg:
             messages.append(cancel_msg)
         return messages
@@ -3333,7 +3333,7 @@ class WifePlugin(Star):
                 # 统计每个道具的数量
                 reward_counts = Counter(rewards)
                 reward_list = [f"{name}×{count}" if count > 1 else name for name, count in reward_counts.items()]
-                fortune_msg = f"福祸相依：获得了{', '.join(reward_list)}"
+                fortune_msg = f"祸福相依：获得了{', '.join(reward_list)}"
         if not get_user_flag(today, uid, "victim_auto_ntr"):
             return fortune_msg
         # 开后宫用户：换老婆次数转换为抽老婆次数
@@ -3920,7 +3920,7 @@ class WifePlugin(Star):
             granted_wives = self._grant_fortune_bond_wife_reward(today, uid, loss, gid)
             if granted_wives:
                 wife_count = len(granted_wives)
-                fortune_msg = f"福祸相依：获得了{wife_count}个新老婆"
+                fortune_msg = f"祸福相依：获得了{wife_count}个新老婆"
         self._maybe_trigger_magic_circuit(today, uid)
         return fortune_msg
 
@@ -6867,7 +6867,7 @@ class WifePlugin(Star):
             if user_fortune_msg:
                 msg += f"\n{user_fortune_msg}"
             if target_fortune_msg:
-                msg += f"\n{target_nick}{target_fortune_msg.replace('福祸相依：', '的福祸相依：')}"
+                msg += f"\n{target_nick}{target_fortune_msg.replace('祸福相依：', '的祸福相依：')}"
             if cancel_msg:
                 msg += f"\n{cancel_msg}"
             return await finalize(True, msg)
@@ -6912,7 +6912,7 @@ class WifePlugin(Star):
             target_nick = target_info.get("nick", f"用户{target_uid}") if isinstance(target_info, dict) else f"用户{target_uid}"
             msg = f"{equal_rights_msg}你对{target_nick}使用「牛道具」成功，掠走了：{'、'.join(stolen)}。"
             if target_fortune_msg:
-                msg += f"\n{target_nick}{target_fortune_msg.replace('福祸相依：', '的福祸相依：')}"
+                msg += f"\n{target_nick}{target_fortune_msg.replace('祸福相依：', '的祸福相依：')}"
             return await finalize(True, msg)
         if name == "偷拍":
             if not target_uid:
@@ -7575,7 +7575,7 @@ class WifePlugin(Star):
             fortune_msg = self._handle_item_loss(today, target_uid, 1, gid)
             msg = f"坏逼来了！{target_nick}随机丢弃了一张道具卡「{discarded_item}」。"
             if fortune_msg:
-                msg += f"\n{target_nick}{fortune_msg.replace('福祸相依：', '的福祸相依：')}"
+                msg += f"\n{target_nick}{fortune_msg.replace('祸福相依：', '的祸福相依：')}"
             return await finalize(True, msg)
         if name == "情敌":
             if not target_uid:
@@ -7605,7 +7605,7 @@ class WifePlugin(Star):
             display_name = self._format_wife_name(cfg, lost_wife)
             msg = f"得不到就毁掉！{target_nick}随机失去了一个老婆「{display_name}」。"
             if fortune_msg:
-                msg += f"\n{target_nick}{fortune_msg.replace('福祸相依：', '的福祸相依：')}"
+                msg += f"\n{target_nick}{fortune_msg.replace('祸福相依：', '的祸福相依：')}"
             return await finalize(True, msg)
         if name == "离婚":
             user_wives = get_wives_list(cfg, uid, today)
