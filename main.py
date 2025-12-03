@@ -3254,7 +3254,22 @@ class WifePlugin(Star):
         payload = {}
         day_effects = effects_data.get(today, {}).get(uid)
         if day_effects is not None:
-            payload["effects"] = copy.deepcopy(day_effects)
+            # 存档时保留额外指令次数，但不记录每日基础使用次数等临时状态
+            effects_copy = copy.deepcopy(day_effects)
+            meta = effects_copy.get("meta", {})
+            # 认老婆相关的每日次数与奖励领取状态不应从存档继承
+            recognize_meta_keys = [
+                "recognize_wife_play_count",       # 今日已进行的认老婆次数
+                "recognize_wife_reward_claimed",   # 今日是否已领取认老婆奖励
+            ]
+            for key in recognize_meta_keys:
+                if key in meta:
+                    # 次数类重置为 0，布尔类重置为 False
+                    if isinstance(meta[key], bool):
+                        meta[key] = False
+                    else:
+                        meta[key] = 0
+            payload["effects"] = effects_copy
         record = wives_data.get(uid)
         if record:
             payload["wife_record"] = copy.deepcopy(record)
@@ -3264,6 +3279,11 @@ class WifePlugin(Star):
         uid = str(uid)
         if "effects" in payload:
             effects_data.setdefault(today, {})[uid] = copy.deepcopy(payload["effects"])
+            # 清除每日重置的数据，这些数据不应该从存档中恢复
+            # blind_box_groups是每日重置的数据，恢复存档时应该清空，允许用户重新抽盲盒
+            if uid in effects_data[today]:
+                meta = effects_data[today][uid].setdefault("meta", {})
+                meta["blind_box_groups"] = []
             save_effects()
         if "wife_record" in payload:
             record = copy.deepcopy(payload["wife_record"])
@@ -4373,8 +4393,13 @@ class WifePlugin(Star):
         else:
             # 检查用户是否真的抽过盲盒（通过blind_box_groups判断，而不是通过user_items判断）
             # 因为用户可能从集市购买道具或被道具作用过，导致user_items有道具但没抽过盲盒
+            # 注意：所有群共用盲盒数据，只要blind_box_groups不为空就表示已经抽过盲盒
             blind_box_groups = get_user_meta(today, uid, "blind_box_groups", [])
-            if blind_box_groups and not allow_extra_draw:
+            if not isinstance(blind_box_groups, list):
+                blind_box_groups = []
+            # 检查blind_box_groups是否为空，如果为空说明还没抽过盲盒
+            # 如果blind_box_groups不为空，说明已经在某个群抽过盲盒了（所有群共用）
+            if len(blind_box_groups) > 0 and not allow_extra_draw:
                 yield event.plain_result(f"你今天已经抽过盲盒啦，明天再来吧~")
                 return
         had_items_before = user_items is not None and len(user_items) > 0
@@ -9128,17 +9153,39 @@ class WifePlugin(Star):
             return
         # 消耗使用次数
         add_user_mod(today, uid, "beat_wife_uses", -1)
+        # 获取老婆列表并选择一个老婆
+        wives = get_wives_list(cfg, uid, today)
+        if not wives:
+            yield event.plain_result(f"你还没有老婆，无法使用「打老婆」指令哦~")
+            return
+        # 随机选择一个老婆（如果有多个）
+        target_wife_img = random.choice(wives)
+        wife_name = self._format_wife_name(cfg, target_wife_img)
         has_landmine = get_user_flag(today, uid, "landmine_girl")
-        # 30% 概率失去所有老婆（病娇效果免疫）
+        # 30% 概率失去选中的老婆（病娇效果免疫）
         if not has_landmine and self._probability_check(0.3, today, uid, positive=False):
+            # 从老婆列表中移除选中的老婆
             if uid in cfg:
-                # 先保存失去的老婆列表
-                lost_wives_list = list(get_wives_list(cfg, uid, today)) if wife_count > 0 else []
-                del cfg[uid]
-                save_group_config(cfg)
-                self._handle_wife_loss(today, uid, wife_count, gid, lost_wives_list=lost_wives_list)
+                rec = cfg[uid]
+                if isinstance(rec, dict):
+                    wives_list = list(rec.get("wives", []))
+                    if target_wife_img in wives_list:
+                        wives_list.remove(target_wife_img)
+                    if not wives_list:
+                        # 如果没有老婆了，删除记录
+                        del cfg[uid]
+                    else:
+                        rec["wives"] = wives_list
+                        if not get_user_flag(today, uid, "harem"):
+                            rec["harem"] = False
+            save_group_config(cfg)
+            # 处理失去老婆的逻辑
+            fortune_msg = self._handle_wife_loss(today, uid, 1, gid, lost_wives_list=[target_wife_img])
             cancel_msg = await self.cancel_swap_on_wife_change(gid, [uid])
-            yield event.plain_result(f"你下手太狠了，老婆伤心地离开了你......你失去了所有老婆。")
+            msg = f"你下手太狠了，{wife_name}伤心地离开了你......"
+            if fortune_msg:
+                msg += f"\n{fortune_msg}"
+            yield event.plain_result(msg)
             if cancel_msg:
                 yield event.plain_result(cancel_msg)
             return
@@ -9157,7 +9204,7 @@ class WifePlugin(Star):
                 "老婆踮脚亲你：“奖励你今晚独享我的撒娇时间！”",
             ]
             text = random.choice(joy_lines)
-            yield event.plain_result(f"你打了老婆...\n{text}")
+            yield event.plain_result(f"你打了{wife_name}...\n{text}")
         else:
             pain_lines = [
                 "呜呜呜...为什么要这样对我...",
@@ -9182,7 +9229,7 @@ class WifePlugin(Star):
                 "我...我做错了什么吗...为什么要这样对我...我真的好痛...",
             ]
             pain_text = random.choice(pain_lines)
-            yield event.plain_result(f"你打了老婆...\n{pain_text}")
+            yield event.plain_result(f"你打了{wife_name}...\n{pain_text}")
 
     async def seduce(self, event: AstrMessageEvent):
         # 勾引主逻辑
