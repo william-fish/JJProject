@@ -2311,7 +2311,7 @@ class WifePlugin(Star):
             {
                 "id": "positive",
                 "label": "阳性",
-                "desc": "阳性：当你的道具或指令成功对其他人生效时，会将自身一个状态传染给对方（优先低星状态）；且每当你使用道具时，你会失去一个随机状态（有50%概率优先失去高星状态，否则随机失去任意状态）",
+                "desc": "阳性：当你的道具或指令成功对其他人生效时，会将自身一个状态传染给对方（优先低星状态）；且每当你使用道具时，你会失去一个随机状态（有50%概率优先失去高星状态）",
                 "checker": flag_checker("positive"),
             },
             {
@@ -2590,7 +2590,7 @@ class WifePlugin(Star):
             {
                 "id": "maximize_use",
                 "label": "光盘行动",
-                "desc": "光盘行动：当你使用道具卡时，会消耗掉所有与之同名的道具卡，使本次使用的道具卡效果翻X倍（X = 同名的道具卡数量）；但在有未使用的道具卡的情况下无法重置盲盒或抽盲盒。",
+                "desc": "光盘行动：当你使用道具卡时，会消耗掉所有与之同名的道具卡，使本次使用的道具卡效果翻1.5X倍（X = 同名的道具卡数量）；但在有未使用的道具卡的情况下无法重置盲盒或抽盲盒。",
                 "item_name": "光盘行动",
                 "checker": flag_checker("maximize_use"),
             },
@@ -4406,7 +4406,7 @@ class WifePlugin(Star):
         existing_items = list(user_items or [])
         if allow_extra_draw:
             add_user_mod(today, uid, "blind_box_extra_draw", -1)
-        # 检查3%概率触发永久加成效果（固定概率，不受其他概率效果影响；超吉状态必定触发，但今日最多触发一次）
+        # 检查2.5%概率触发永久加成效果（固定概率，不受其他概率效果影响；超吉状态必定触发，但今日最多触发一次）
         perk_triggered = False
         perk_message = ""
         is_super_lucky = get_user_flag(today, uid, "super_lucky")
@@ -4426,7 +4426,7 @@ class WifePlugin(Star):
             else:  # empty_reduction
                 new_value = add_blind_box_perk(uid, "empty_reduction_bonus", 0.04, max_value=0.20)
                 perk_message = f"🎁 幸运事件！你获得了永久加成：抽盲盒抽不到道具卡的概率-4%（当前-{int(new_value * 100)}%，最多-20%）"
-        elif not is_super_lucky and random.random() < 0.03:
+        elif not is_super_lucky and random.random() < 0.025:
             # 固定3%概率，不受其他概率效果影响
             perk_triggered = True
             perk_type = random.choice(["item_count", "crit_rate", "empty_reduction"])
@@ -5921,7 +5921,7 @@ class WifePlugin(Star):
             status_count_before = sum(1 for v in flags_before.values() if v)
 
         # 光盘行动状态：统计同名道具卡数量，消耗所有同名道具卡，并计算倍数
-        maximize_factor = 1
+        maximize_factor = 1.0
         if get_user_flag(today, uid, "maximize_use"):
             today_items = item_data.setdefault(today, {})
             user_items = today_items.setdefault(uid, [])
@@ -5933,10 +5933,10 @@ class WifePlugin(Star):
                     user_items.remove(name)
                 save_item_data()
                 # 计算倍数：与二度寝为加算逻辑
-                # 如果有3张同名道具卡，倍数就是3；如果有2张，倍数就是2
-                maximize_factor = same_name_count
+                # 新规则：倍率 = 1.5 * 同名道具数量
+                maximize_factor = same_name_count * 1.5
                 # 最终倍数 = double_factor + (maximize_factor - 1)
-                # 例如：double_factor=2（二度寝），maximize_factor=3（3张同名卡），最终倍数 = 2 + (3-1) = 4
+                # 例如：double_factor=2（二度寝），maximize_factor=4.5（3张同名卡），最终倍数 = 2 + (4.5-1) = 5.5
                 double_factor = double_factor + (maximize_factor - 1)
 
         # 跟踪是否实际应用了翻倍效果（用于决定是否消耗二度寝状态）
@@ -9080,25 +9080,32 @@ class WifePlugin(Star):
         add_user_mod(today, uid, "select_wife_uses", -1)
         # 筛选卡池
         cfg = load_group_config(gid)
+        keyword_lower = keyword.lower()
+
+        def _match_wife_images(image_names: list[str]) -> list[str]:
+            exact_matches: list[str] = []
+            fuzzy_matches: list[str] = []
+            for img_name in image_names:
+                base = os.path.splitext(img_name)[0]
+                base_lower = base.lower()
+                chara_lower = base_lower.split("!", 1)[1] if "!" in base_lower else None
+                if base_lower == keyword_lower or (chara_lower and chara_lower == keyword_lower):
+                    exact_matches.append(img_name)
+                elif keyword_lower in base_lower or (chara_lower and keyword_lower in chara_lower):
+                    fuzzy_matches.append(img_name)
+            return exact_matches if exact_matches else fuzzy_matches
+
         local_imgs = os.listdir(IMG_DIR)
-        filtered_imgs = []
+        filtered_imgs: list[str] = []
         if local_imgs:
-            keyword_lower = keyword.lower()
-            filtered_imgs = [
-                img_name for img_name in local_imgs
-                if keyword_lower in img_name.lower()
-            ]
+            filtered_imgs = _match_wife_images(local_imgs)
         else:
             try:
                 async with aiohttp.ClientSession() as session:
                     async with session.get(self.image_base_url) as resp:
                         text = await resp.text()
                         all_imgs = text.splitlines()
-                        keyword_lower = keyword.lower()
-                        filtered_imgs = [
-                            img_name for img_name in all_imgs
-                            if keyword_lower in img_name.lower()
-                        ]
+                        filtered_imgs = _match_wife_images(all_imgs)
             except:
                 yield event.plain_result("抱歉，今天的老婆获取失败了，请稍后再试~")
                 return
