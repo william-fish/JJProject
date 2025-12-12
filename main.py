@@ -1414,6 +1414,7 @@ def get_user_effects(today: str, uid: str) -> dict:
             "dealer": False,  # 荷官
             "dingdong": False,  # 叮咚鸡
             "positive": False,  # 阳性
+            "dominate_demon": False,  # 支配恶魔
             },
             "meta": {
                 "ntr_penalty_stack": 0,  # 苦主：失去老婆次数增量 -> 换老婆额外次数
@@ -1998,10 +1999,10 @@ class WifePlugin(Star):
         self.swap_max_per_day = config.get("swap_max_per_day")
         self.market_max_wives = 16
         self.market_max_items = 8
-        # 存储大凶骰子结果，键为 (today, uid)，值为 "大吉" 或 "大凶"
-        self.doom_dice_results = {}
+        # 存储风险骰子结果，键为 (today, uid)，值为 "大吉" 或 "大凶"
+        self.risk_dice_results = {}
         # 存储【厄兆】事件的提示语，键为 (today, uid)，值为提示语字符串
-        self.doom_omen_messages = {}
+        self.risk_omen_messages = {}
         # 认老婆挑战会话状态：键为 (gid, uid)
         self.recognize_sessions: dict[tuple[str, str], dict] = {}
         self.item_pool = [
@@ -2060,7 +2061,7 @@ class WifePlugin(Star):
             "都来看mygo",
             "后宫王的特权",
             "出千",
-            "大凶骰子",
+            "风险骰子",
             "咕咕嘎嘎",
             "洗脑",
             "拼好饭",
@@ -2068,6 +2069,7 @@ class WifePlugin(Star):
             "谁问你了",
             "接盘侠",
             "月老",
+            "支配恶魔",
             "转转回收",
             "王车易位",
             "其人之道",
@@ -2150,7 +2152,7 @@ class WifePlugin(Star):
             "都来看mygo": 2,
             "后宫王的特权": 5,
             "出千": 4,
-            "大凶骰子": 5,
+            "风险骰子": 5,
             "咕咕嘎嘎": 3,
             "洗脑": 3,
             "拼好饭": 2,
@@ -2158,6 +2160,7 @@ class WifePlugin(Star):
             "谁问你了": 5,
             "接盘侠": 4,
             "月老": 3,
+            "支配恶魔": 4,
             "管人痴": 2,
             "转转回收": 4,
             "王车易位": 5,
@@ -2453,11 +2456,11 @@ class WifePlugin(Star):
                 "checker": flag_checker("cheat"),
             },
             {
-                "id": "doom_dice",
-                "label": "大凶骰子",
-                "desc": "大凶骰子：你今日在进行所有概率判定前都会掷一枚D20，19面为大吉，1面为大凶；大吉时正面概率翻倍、负面概率减半；大凶时正面概率为0%、负面概率为90%并触发【厄兆】事件",
-                "item_name": "大凶骰子",
-                "checker": flag_checker("doom_dice"),
+                "id": "risk_dice",
+                "label": "风险骰子",
+                "desc": "风险骰子：你今日在进行所有概率判定前都会掷一枚D20，19面为大吉，1面为大凶；大吉时正面概率翻倍、负面概率减半；大凶时正面概率为0%、负面概率为90%并触发【厄兆】事件",
+                "item_name": "风险骰子",
+                "checker": flag_checker("risk_dice"),
             },
             {
                 "id": "omen_pioneer",
@@ -2482,6 +2485,13 @@ class WifePlugin(Star):
                 "desc_generator": (lambda today, uid, gid, plugin=self: (
                     f"拼友：盲盒可能获得的道具卡数量增加（已拼成：+{plugin._count_pin_friends(today)}）"
                 )),
+            },
+            {
+                "id": "dominate_demon",
+                "label": "支配恶魔",
+                "desc": "支配恶魔：你换老婆时可以@用户目标，当你使用换老婆并@目标时，视为目标使用该指令，但消耗你的换老婆次数。你使用换老婆指令消耗的次数翻倍",
+                "item_name": "支配恶魔",
+                "checker": flag_checker("dominate_demon"),
             },
             {
                 "id": "ambidextrous",
@@ -4022,7 +4032,7 @@ class WifePlugin(Star):
         today_items = item_data.setdefault(today, {})
         user_items = today_items.setdefault(uid, [])
         steal = self._probability_check(0.5, today, uid, positive=True)
-        doom_result = self._get_doom_dice_result(today, uid)
+        doom_result = self._get_risk_dice_result(today, uid)
         if steal:
             target_items = today_items.get(target_uid, [])
             if target_items:
@@ -4033,18 +4043,18 @@ class WifePlugin(Star):
                 self._handle_item_loss(today, target_uid, 1, gid)
                 target_info = cfg.get(target_uid, {})
                 target_nick = target_info.get("nick", f"用户{target_uid}") if isinstance(target_info, dict) else f"用户{target_uid}"
-                yield self._plain_result_with_doom_dice(event, f"，顺手牵羊成功，从{target_nick}那里偷到了「{stolen}」！", today, uid, doom_result)
+                yield self._plain_result_with_risk_dice(event, f"，顺手牵羊成功，从{target_nick}那里偷到了「{stolen}」！", today, uid, doom_result)
             else:
-                yield self._plain_result_with_doom_dice(event, f"，你想顺手牵羊，但对方没有道具可偷。", today, uid, doom_result)
+                yield self._plain_result_with_risk_dice(event, f"，你想顺手牵羊，但对方没有道具可偷。", today, uid, doom_result)
         else:
             if user_items:
                 lost = random.choice(user_items)
                 user_items.remove(lost)
                 save_item_data()
                 self._handle_item_loss(today, uid, 1, gid)
-                yield self._plain_result_with_doom_dice(event, f"，被抓个正着，失去了自己的「{lost}」。", today, uid, doom_result)
+                yield self._plain_result_with_risk_dice(event, f"，被抓个正着，失去了自己的「{lost}」。", today, uid, doom_result)
             else:
-                yield self._plain_result_with_doom_dice(event, f"，被抓个正着，但你身上没有道具。", today, uid, doom_result)
+                yield self._plain_result_with_risk_dice(event, f"，被抓个正着，但你身上没有道具。", today, uid, doom_result)
 
     async def _handle_light_fingers_on_market(self, today: str, uid: str, event: AstrMessageEvent, market: dict):
         if not get_user_flag(today, uid, "light_fingers"):
@@ -4054,7 +4064,7 @@ class WifePlugin(Star):
         today_items = item_data.setdefault(today, {})
         user_items = today_items.setdefault(uid, [])
         steal = self._probability_check(0.5, today, uid, positive=True)
-        doom_result = self._get_doom_dice_result(today, uid)
+        doom_result = self._get_risk_dice_result(today, uid)
         if steal:
             market_items = market.get("items", [])
             if market_items:
@@ -4063,18 +4073,18 @@ class WifePlugin(Star):
                 user_items.append(stolen)
                 save_market_data()
                 save_item_data()
-                yield self._plain_result_with_doom_dice(event, f"顺手牵羊成功，从集市额外偷到了「{stolen}」！", today, uid, doom_result)
+                yield self._plain_result_with_risk_dice(event, f"顺手牵羊成功，从集市额外偷到了「{stolen}」！", today, uid, doom_result)
             else:
-                yield self._plain_result_with_doom_dice(event, f"你想顺手牵羊，但集市里已经没有道具卡可偷。", today, uid, doom_result)
+                yield self._plain_result_with_risk_dice(event, f"你想顺手牵羊，但集市里已经没有道具卡可偷。", today, uid, doom_result)
         else:
             if user_items:
                 lost = random.choice(user_items)
                 user_items.remove(lost)
                 save_item_data()
                 self._handle_item_loss(today, uid, 1, gid)
-                yield self._plain_result_with_doom_dice(event, f"被抓个正着，集市管理员没收了你的「{lost}」。", today, uid, doom_result)
+                yield self._plain_result_with_risk_dice(event, f"被抓个正着，集市管理员没收了你的「{lost}」。", today, uid, doom_result)
             else:
-                yield self._plain_result_with_doom_dice(event, f"被抓个正着，但你身上没有道具卡可没收。", today, uid, doom_result)
+                yield self._plain_result_with_risk_dice(event, f"被抓个正着，但你身上没有道具卡可没收。", today, uid, doom_result)
 
     async def _redistribute_wives(self, gid: str, today: str, event: AstrMessageEvent, cfg: dict):
         today_users = []
@@ -4500,7 +4510,7 @@ class WifePlugin(Star):
                     gain_multiplier=1.0,  # 品质概率计算不使用增益乘区
                     apply_special=True,   # 应用特殊乘区（幸运E）
                     apply_final=apply_final,  # 只有4~5星应用最终乘区
-                    gid=gid  # 传递gid用于大凶骰子清空效果
+                    gid=gid  # 传递gid用于风险骰子清空效果
                 )
                 probs[quality] = adjusted_prob
             
@@ -4654,8 +4664,8 @@ class WifePlugin(Star):
         # 检查老千状态：抽盲盒时30%概率获得随机道具卡
         cheat_bonus = None
         if get_user_flag(today, uid, "cheat"):
-            # 该判定视为"中立效果"：会受幸运E等影响，但不受大凶骰子影响
-            if self._probability_check(0.3, today, uid, positive=True, apply_doom_dice=False):
+            # 该判定视为"中立效果"：会受幸运E等影响，但不受风险骰子影响
+            if self._probability_check(0.3, today, uid, positive=True, apply_risk_dice=False):
                 if self.item_pool:
                     drawn = self._draw_item_by_quality(today, uid, count=1, cfg=cfg, gid=gid)
                     if drawn:
@@ -5839,7 +5849,7 @@ class WifePlugin(Star):
                     extra_msg = f"魔术回路发动！你获得了随机道具卡「{bonus_card}」。"
                     message = f"{message}\n{extra_msg}" if message else extra_msg
                     if get_user_flag(today, uid, "cheat") and self._probability_check(0.3, today, uid, positive=True):
-                        doom_result = self._get_doom_dice_result(today, uid)
+                        doom_result = self._get_risk_dice_result(today, uid)
                         if self.item_pool:
                             drawn = self._draw_item_by_quality(today, uid, count=1, cfg=cfg, gid=gid)
                             if drawn:
@@ -5866,9 +5876,9 @@ class WifePlugin(Star):
             if is_blind_box_enthusiast:
                 now = datetime.utcnow().timestamp()
                 set_user_meta(today, uid, "last_item_use_time", now)
-        # 检查是否有大凶骰子结果需要添加到消息前缀
-        doom_result = self._get_doom_dice_result(today, uid)
-        omen_message = self._get_doom_omen_message(today, uid)
+        # 检查是否有风险骰子结果需要添加到消息前缀
+        doom_result = self._get_risk_dice_result(today, uid)
+        omen_message = self._get_risk_omen_message(today, uid)
         final_message = message or f"道具卡「{card_name}」已处理。"
         if doom_result:
             final_message = f"【{doom_result}】{final_message}"
@@ -5933,11 +5943,13 @@ class WifePlugin(Star):
                     user_items.remove(name)
                 save_item_data()
                 # 计算倍数：与二度寝为加算逻辑
-                # 新规则：倍率 = 1.5 * 同名道具数量
+                # 新规则：倍率 = 1.5 * 同名道具数量，向下取整避免出现小数次机会
                 maximize_factor = same_name_count * 1.5
                 # 最终倍数 = double_factor + (maximize_factor - 1)
-                # 例如：double_factor=2（二度寝），maximize_factor=4.5（3张同名卡），最终倍数 = 2 + (4.5-1) = 5.5
+                # 例如：double_factor=2（二度寝），maximize_factor=4.5（3张同名卡），最终倍数 = 2 + (4.5-1) = 5.5，向下取整为5
                 double_factor = double_factor + (maximize_factor - 1)
+                # 向下取整，避免出现1.5次机会等不合理情况
+                double_factor = int(double_factor)
 
         # 跟踪是否实际应用了翻倍效果（用于决定是否消耗二度寝状态）
         double_effect_applied = False
@@ -5953,10 +5965,10 @@ class WifePlugin(Star):
                 and double_effect_used
             ):
                 set_user_flag(today, uid, "double_item_effect", False)
-            # 检查是否有大凶骰子结果需要添加到消息前缀
-            # 注意：无论message是否为空，都要清除大凶骰子结果，避免结果残留导致重复显示
-            doom_result = self._get_doom_dice_result(today, uid)
-            omen_message = self._get_doom_omen_message(today, uid)
+            # 检查是否有风险骰子结果需要添加到消息前缀
+            # 注意：无论message是否为空，都要清除风险骰子结果，避免结果残留导致重复显示
+            doom_result = self._get_risk_dice_result(today, uid)
+            omen_message = self._get_risk_omen_message(today, uid)
             if doom_result:
                 if message:
                     message = f"【{doom_result}】{message}"
@@ -6015,9 +6027,9 @@ class WifePlugin(Star):
                 base_prob = 0.5
                 adjusted_prob = self._calculate_probability(base_prob, today, uid, gain_multiplier=1.0, gid=gid)
                 adjusted_prob = min(0.9, adjusted_prob)  # 概率上限为90%
-                # 清除品鉴中状态触发的大凶骰子结果（如果品鉴中状态触发了概率判定，大凶骰子结果会被清除）
-                # 注意：品鉴中状态不使用大凶骰子前缀，所以需要清除结果避免残留
-                _ = self._get_doom_dice_result(today, uid)
+                # 清除品鉴中状态触发的风险骰子结果（如果品鉴中状态触发了概率判定，风险骰子结果会被清除）
+                # 注意：品鉴中状态不使用风险骰子前缀，所以需要清除结果避免残留
+                _ = self._get_risk_dice_result(today, uid)
                 if random.random() < adjusted_prob:
                     # 获取群内所有其他用户（排除自己）
                     others = [str(u) for u in cfg.keys() if u != uid]
@@ -6074,9 +6086,9 @@ class WifePlugin(Star):
                                     message = stacking_msg
                         finally:
                             setattr(event, "_stacking_tower_triggering", False)
-            # 在finalize函数最后，清除所有残留的大凶骰子结果，避免结果残留导致重复显示
-            # 注意：所有需要显示大凶骰子前缀的地方都应该在获取结果后立即使用，这里只是清理残留
-            _ = self._get_doom_dice_result(today, uid)
+            # 在finalize函数最后，清除所有残留的风险骰子结果，避免结果残留导致重复显示
+            # 注意：所有需要显示风险骰子前缀的地方都应该在获取结果后立即使用，这里只是清理残留
+            _ = self._get_risk_dice_result(today, uid)
             return success_flag, message
         # 长一智被动效果：如果本次道具有明确目标，且目标拥有长一智，则目标在生效后获得同名道具卡
         learned_target_uid = None
@@ -6325,7 +6337,7 @@ class WifePlugin(Star):
                 seen = set()
                 for forced in forced_targets:
                     forced_str = str(forced)
-                    if forced_str == uid or forced_str in seen:
+                    if forced_str in seen:
                         continue
                     seen.add(forced_str)
                     targets.append(forced_str)
@@ -6334,7 +6346,6 @@ class WifePlugin(Star):
             else:
                 riddler_messages = []
                 targets = self.parse_multi_targets(event, limit=2, riddler_messages=riddler_messages)
-                targets = [t for t in targets if t != uid]
             if len(targets) < 2:
                 riddler_info = "\n".join(riddler_messages) if riddler_messages else ""
                 result_msg = f"{riddler_info}\n使用「月老」时请@两个不同的目标哦~" if riddler_info else f"使用「月老」时请@两个不同的目标哦~"
@@ -6384,10 +6395,35 @@ class WifePlugin(Star):
             if get_user_flag(today, target_uid, "ban_items"):
                 return await finalize(False, f"对方正处于贤者时间，暂时无法与其互换状态。")
             day_map = effects_data.setdefault(today, {})
-            user_effect = copy.deepcopy(get_user_effects(today, uid))
-            target_effect = copy.deepcopy(get_user_effects(today, target_uid))
-            day_map[uid] = target_effect
-            day_map[target_uid] = user_effect
+            user_effect = get_user_effects(today, uid)
+            target_effect = get_user_effects(today, target_uid)
+            # 指令额外次数的mods字段列表
+            command_mod_keys = [
+                "change_extra_uses",
+                "ntr_extra_uses",
+                "select_wife_uses",
+                "beat_wife_uses",
+                "seduce_uses",
+                "blind_box_extra_draw",
+                "reset_extra_uses",
+                "reset_blind_box_extra",
+                "gift_extra_uses",
+                "market_extra_purchases",
+                "market_wife_extra_purchases",
+            ]
+            # 交换flags状态
+            user_flags = copy.deepcopy(user_effect.get("flags", {}))
+            target_flags = copy.deepcopy(target_effect.get("flags", {}))
+            user_effect["flags"] = target_flags
+            target_effect["flags"] = user_flags
+            # 交换指令额外次数
+            user_mods = user_effect.setdefault("mods", {})
+            target_mods = target_effect.setdefault("mods", {})
+            for key in command_mod_keys:
+                user_val = user_mods.get(key, 0)
+                target_val = target_mods.get(key, 0)
+                user_mods[key] = target_val
+                target_mods[key] = user_val
             save_effects()
             target_info = cfg.get(target_uid, {})
             target_nick = target_info.get("nick", f"用户{target_uid}") if isinstance(target_info, dict) else f"用户{target_uid}"
@@ -7565,10 +7601,15 @@ class WifePlugin(Star):
         if name == "塞翁失马":
             set_user_flag(today, uid, "fortune_linked", True)
             return await finalize(True, f"塞翁失马焉知非福？")
-        if name == "大凶骰子":
-            # 获得大凶骰子状态：所有概率判定前会掷一次D20
-            set_user_flag(today, uid, "doom_dice", True)
-            return await finalize(True, f"你掷出了「大凶骰子」！今日所有概率事件前都会预先掷一枚20面骰子，可能大吉也可能大凶……")
+        if name == "风险骰子":
+            # 获得风险骰子状态：所有概率判定前会掷一次D20
+            set_user_flag(today, uid, "risk_dice", True)
+            return await finalize(True, f"你掷出了「风险骰子」！今日所有概率事件前都会预先掷一枚20面骰子，可能大吉也可能大凶……")
+        if name == "支配恶魔":
+            # 获得2次换老婆额外次数，并获得支配恶魔状态
+            add_user_mod(today, uid, "change_extra_uses", 2 * double_factor)
+            set_user_flag(today, uid, "dominate_demon", True)
+            return await finalize(True, f"你获得了「支配恶魔」状态！获得了{2 * double_factor}次换老婆额外次数，现在你可以在换老婆时@目标用户，让目标使用换老婆指令（消耗你的次数，且次数消耗翻倍）。")
         if name == "奇迹于你":
             # 获得"奇迹于你"状态
             set_user_flag(today, uid, "omen_pioneer", True)
@@ -8520,6 +8561,87 @@ class WifePlugin(Star):
         today = get_today()
         cfg = load_group_config(gid)
         rec = change_records.get(uid, {"date": "", "count": 0})
+        
+        # 支配恶魔状态：检查是否@了目标
+        is_dominate_demon = get_user_flag(today, uid, "dominate_demon")
+        target_uid = None
+        if is_dominate_demon:
+            target_uid = self.parse_at_target(event, ignore_riddler=True)
+            if target_uid:
+                # @了目标，让目标执行换老婆（但消耗使用者的次数，且次数翻倍）
+                target_nick = cfg.get(target_uid, {}).get("nick", f"用户{target_uid}") if isinstance(cfg.get(target_uid), dict) else f"用户{target_uid}"
+                # 检查目标是否有老婆
+                target_wives = get_wives_list(cfg, target_uid, today)
+                if not target_wives:
+                    yield event.plain_result(f"目标用户{target_nick}今天还没有老婆，无法使用支配恶魔效果。")
+                    return
+                # 检查目标是否开后宫
+                if get_user_flag(today, target_uid, "harem"):
+                    yield event.plain_result(f"目标用户{target_nick}处于开后宫状态，无法使用「换老婆」指令哦~")
+                    return
+                # 让目标执行换老婆，但消耗使用者的次数（翻倍）
+                # 先检查使用者的次数是否足够（翻倍消耗）
+                if rec.get("date") != today:
+                    rec = {"date": today, "count": 0}
+                    change_records[uid] = rec
+                group_bonus = int(get_group_meta(today, gid, "change_extra_uses", 0))
+                max_change = (self.change_max_per_day or 0) + int(get_user_mod(today, uid, "change_extra_uses", 0)) + group_bonus
+                # 支配恶魔：消耗次数翻倍，所以需要检查是否至少还有2次（如果只剩1次，翻倍后需要2次）
+                required_count = rec["count"] + 2  # 翻倍消耗
+                if required_count > max_change:
+                    yield event.plain_result(f"你的换老婆次数不足（支配恶魔效果需要消耗2次），无法使用。")
+                    return
+                # 执行目标的换老婆逻辑
+                target_lost_count = len(target_wives)
+                target_lost_wives_list = list(target_wives) if target_wives else []
+                if target_uid in cfg:
+                    del cfg[target_uid]
+                self._handle_wife_loss(today, target_uid, target_lost_count, gid, lost_wives_list=target_lost_wives_list)
+                # 检查目标的失败概率
+                target_fail_prob = float(get_user_mod(today, target_uid, "change_fail_prob", 0.0) or 0.0)
+                if target_fail_prob > 0 and self._probability_check(target_fail_prob, today, target_uid, positive=False):
+                    doom_result = self._get_risk_dice_result(today, target_uid)
+                    # 消耗使用者的次数（翻倍）
+                    rec["count"] += 2
+                    change_records[uid] = rec
+                    save_change_records()
+                    yield self._plain_result_with_risk_dice(event, f"支配恶魔效果：{target_nick}换老婆失败了，真可惜......（消耗了你2次换老婆次数）", today, target_uid, doom_result)
+                    return
+                # 检查目标的免消耗概率
+                target_consume = True
+                target_free_prob = clamp_probability(get_user_mod(today, target_uid, "change_free_prob", 0.0) or 0.0)
+                if target_free_prob > 0 and self._probability_check(target_free_prob, today, target_uid, positive=True):
+                    target_consume = False
+                # 保存目标的老婆数据
+                if not get_user_flag(today, target_uid, "harem"):
+                    save_group_config(cfg)
+                # 消耗使用者的次数（翻倍，但目标的免消耗不影响）
+                rec["count"] += 2
+                change_records[uid] = rec
+                save_change_records()
+                # 检查并取消相关交换请求
+                cancel_msg = await self.cancel_swap_on_wife_change(gid, [target_uid])
+                if cancel_msg:
+                    yield event.plain_result(cancel_msg)
+                cuckold_msgs = await self._dispatch_cuckold_wives(today, gid, target_uid, target_wives)
+                for text in cuckold_msgs:
+                    yield event.plain_result(text)
+                # 创建临时事件对象，让目标抽老婆
+                temp_event = copy.deepcopy(event)
+                temp_event.message_obj.sender.qq = int(target_uid)
+                temp_event.message_obj.sender.name = target_nick
+                # 立即展示目标的新老婆
+                async for res in self.animewife(temp_event):
+                    yield res
+                self._grant_lightbulb_bonus(today, gid, "change")
+                yield event.plain_result(f"支配恶魔效果：你让{target_nick}使用了换老婆指令（消耗了你2次换老婆次数）")
+                # 触发左右开弓等效果（以目标身份）
+                extra_msgs = await self._trigger_ambidextrous(today, gid, target_uid, target_nick)
+                for extra in extra_msgs:
+                    if extra:
+                        yield event.plain_result(extra)
+                return
+        
         # 禁止换老婆标记：由纯爱战士或黄毛状态带来
         if get_user_flag(today, uid, "protect_from_ntr") or get_user_flag(today, uid, "next_ntr_guarantee"):
             yield event.plain_result(f"你今天无法使用「换老婆」哦~")
@@ -8562,11 +8684,21 @@ class WifePlugin(Star):
             # 普通用户：额外可用次数修正
             group_bonus = int(get_group_meta(today, gid, "change_extra_uses", 0))
             max_change = (self.change_max_per_day or 0) + int(get_user_mod(today, uid, "change_extra_uses", 0)) + group_bonus
-            if rec["count"] >= max_change:
-                yield event.plain_result(
-                    f"你今天已经换了{max_change}次老婆啦，明天再来吧~"
-                )
-                return
+            # 支配恶魔状态：检查时需要考虑翻倍消耗（如果只剩1次，翻倍后需要2次）
+            check_count = rec["count"]
+            if is_dominate_demon:
+                # 如果当前次数+1（翻倍后是+2）会超过限制，则不允许
+                if check_count + 2 > max_change:
+                    yield event.plain_result(
+                        f"你今天已经换了{max_change}次老婆啦，明天再来吧~（支配恶魔效果：每次消耗2次）"
+                    )
+                    return
+            else:
+                if check_count >= max_change:
+                    yield event.plain_result(
+                        f"你今天已经换了{max_change}次老婆啦，明天再来吧~"
+                    )
+                    return
         wives = get_wives_list(cfg, uid, today)
         if not wives:
             yield event.plain_result(f"你今天还没有老婆，先去抽一个再来换吧~")
@@ -8579,11 +8711,15 @@ class WifePlugin(Star):
         self._handle_wife_loss(today, uid, lost_count, gid, lost_wives_list=lost_wives_list)
         fail_prob = float(get_user_mod(today, uid, "change_fail_prob", 0.0) or 0.0)
         if fail_prob > 0 and self._probability_check(fail_prob, today, uid, positive=False):
-            doom_result = self._get_doom_dice_result(today, uid)
-            rec["count"] += 1
+            doom_result = self._get_risk_dice_result(today, uid)
+            # 支配恶魔状态：消耗次数翻倍
+            if is_dominate_demon:
+                rec["count"] += 2
+            else:
+                rec["count"] += 1
             change_records[uid] = rec
             save_change_records()
-            yield self._plain_result_with_doom_dice(event, f"换老婆失败了，真可惜......", today, uid, doom_result)
+            yield self._plain_result_with_risk_dice(event, f"换老婆失败了，真可惜......", today, uid, doom_result)
             return
         consume = True
         free_prob = clamp_probability(get_user_mod(today, uid, "change_free_prob", 0.0) or 0.0)
@@ -8609,7 +8745,11 @@ class WifePlugin(Star):
         else:
             # 普通状态：记录使用次数
             if consume:
-                rec["count"] += 1
+                # 支配恶魔状态：消耗次数翻倍
+                if is_dominate_demon:
+                    rec["count"] += 2
+                else:
+                    rec["count"] += 1
             change_records[uid] = rec
             save_change_records()
         # 检查并取消相关交换请求
@@ -8673,14 +8813,14 @@ class WifePlugin(Star):
         save_json(RESET_SHARED_FILE, reset_records)
         tid = self.parse_at_target(event) or uid
         if self._probability_check(self.reset_success_rate, today, uid, positive=True):
-            doom_result = self._get_doom_dice_result(today, uid)
+            doom_result = self._get_risk_dice_result(today, uid)
             if tid in ntr_records:
                 del ntr_records[tid]
                 save_ntr_records()
             chain = [Plain("已重置"), At(qq=int(tid)), Plain("的牛老婆次数。")]
             yield event.chain_result(chain)
         else:
-            doom_result = self._get_doom_dice_result(today, uid)
+            doom_result = self._get_risk_dice_result(today, uid)
             try:
                 await event.bot.set_group_ban(
                     group_id=int(gid),
@@ -8689,7 +8829,7 @@ class WifePlugin(Star):
                 )
             except:
                 pass
-            yield self._plain_result_with_doom_dice(event, f"重置牛失败，被禁言{self.reset_mute_duration}秒，下次记得再接再厉哦~", today, uid, doom_result)
+            yield self._plain_result_with_risk_dice(event, f"重置牛失败，被禁言{self.reset_mute_duration}秒，下次记得再接再厉哦~", today, uid, doom_result)
 
     async def reset_change_wife(self, event: AstrMessageEvent):
         # 重置换老婆主逻辑
@@ -8731,14 +8871,14 @@ class WifePlugin(Star):
         save_json(RESET_SHARED_FILE, reset_records)
         tid = self.parse_at_target(event) or uid
         if self._probability_check(self.reset_success_rate, today, uid, positive=True):
-            doom_result = self._get_doom_dice_result(today, uid)
+            doom_result = self._get_risk_dice_result(today, uid)
             if tid in change_records:
                 del change_records[tid]
                 save_change_records()
             chain = [Plain("已重置"), At(qq=int(tid)), Plain("的换老婆次数。")]
             yield event.chain_result(chain)
         else:
-            doom_result = self._get_doom_dice_result(today, uid)
+            doom_result = self._get_risk_dice_result(today, uid)
             try:
                 await event.bot.set_group_ban(
                     group_id=int(gid),
@@ -8747,7 +8887,7 @@ class WifePlugin(Star):
                 )
             except:
                 pass
-            yield self._plain_result_with_doom_dice(event, f"重置换失败，被禁言{self.reset_mute_duration}秒，下次记得再接再厉哦~", today, uid, doom_result)
+            yield self._plain_result_with_risk_dice(event, f"重置换失败，被禁言{self.reset_mute_duration}秒，下次记得再接再厉哦~", today, uid, doom_result)
 
     async def swap_wife(self, event: AstrMessageEvent):
         # 发起交换老婆请求
@@ -9733,7 +9873,7 @@ class WifePlugin(Star):
                                 apply_final: bool = True,
                                 *,
                                 positive: bool = True,
-                                apply_doom_dice: bool = True,
+                                apply_risk_dice: bool = True,
                                 gid: str = None) -> float:
         """
         统一的概率计算函数，按照4个乘区顺序计算
@@ -9744,11 +9884,11 @@ class WifePlugin(Star):
         - uid: 用户ID
         - additive_bonus: 加算乘区的加成值（直接加到概率上）
         - gain_multiplier: 增益乘区的倍数（乘法）
-        - apply_special: 是否应用特殊乘区（幸运E、大凶骰子等）
+        - apply_special: 是否应用特殊乘区（幸运E、风险骰子等）
         - apply_final: 是否应用最终乘区（今日运势、吉星如意）
         - positive: 当前判定是否为正面概率（True 为正面，如收益；False 为负面，如损失、惩罚）
-        - apply_doom_dice: 是否应用大凶骰子（用于中立判定时关闭大凶骰子影响）
-        - gid: 群ID（可选，用于大凶骰子掷出大凶时清空老婆或道具卡）
+        - apply_risk_dice: 是否应用风险骰子（用于中立判定时关闭风险骰子影响）
+        - gid: 群ID（可选，用于风险骰子掷出大凶时清空老婆或道具卡）
         
         返回：调整后的概率值
         """
@@ -9762,23 +9902,23 @@ class WifePlugin(Star):
         
         prob = prob * gain_multiplier
         
-        # 第三步：特殊乘区 - 有特殊标注的效果（如大凶骰子、幸运E）
+        # 第三步：特殊乘区 - 有特殊标注的效果（如风险骰子、幸运E）
         if apply_special:
-            # 大凶骰子效果：在所有基础加成/增益之后，根据正负面概率进行一次随机修正
-            # 可通过 apply_doom_dice=False 将本次判定视为"中立"，不受大凶骰子影响
-            if apply_doom_dice and get_user_flag(today, uid, "doom_dice"):
+            # 风险骰子效果：在所有基础加成/增益之后，根据正负面概率进行一次随机修正
+            # 可通过 apply_risk_dice=False 将本次判定视为"中立"，不受风险骰子影响
+            if apply_risk_dice and get_user_flag(today, uid, "risk_dice"):
                 roll = random.randint(1, 20)
                 # 19面为大吉（2~20），1面为大凶
                 if roll == 1:
                     # 大凶：正面概率直接归零，负面概率直接设为90%
-                    self.doom_dice_results[(today, uid)] = "大凶"
+                    self.risk_dice_results[(today, uid)] = "大凶"
                     if positive:
                         prob = 0.0
                     else:
                         prob = 0.9
-                    # 大凶额外效果：随机失去所有老婆、道具卡或大凶骰子状态（三者触发其一）
-                    # 随机选择失去老婆、道具卡或大凶骰子状态
-                    lose_type = random.choice(["wife", "item", "doom_dice"])
+                    # 大凶额外效果：随机失去所有老婆、道具卡或风险骰子状态（三者触发其一）
+                    # 随机选择失去老婆、道具卡或风险骰子状态
+                    lose_type = random.choice(["wife", "item", "risk_dice"])
                     key = (today, uid)
                     if lose_type == "wife":
                         # 清空所有老婆（需要gid）
@@ -9793,7 +9933,7 @@ class WifePlugin(Star):
                                     save_group_config(cfg)
                                     self._handle_wife_loss(today, uid, loss, gid, lost_wives_list=lost_wives_list)
                                     # 存储【厄兆】事件提示语
-                                    self.doom_omen_messages[key] = f"【厄兆】你失去了所有老婆（{loss}个）"
+                                    self.risk_omen_messages[key] = f"【厄兆】你失去了所有老婆（{loss}个）"
                     elif lose_type == "item":
                         # 清空所有道具卡（需要gid）
                         if gid:
@@ -9804,15 +9944,15 @@ class WifePlugin(Star):
                                     save_item_data()
                                     self._handle_item_loss(today, uid, lost_items, gid)
                                     # 存储【厄兆】事件提示语
-                                    self.doom_omen_messages[key] = f"【厄兆】你失去了所有道具卡（{lost_items}张）"
+                                    self.risk_omen_messages[key] = f"【厄兆】你失去了所有道具卡（{lost_items}张）"
                     else:
-                        # 失去大凶骰子状态（不需要gid）
-                        set_user_flag(today, uid, "doom_dice", False)
+                        # 失去风险骰子状态（不需要gid）
+                        set_user_flag(today, uid, "risk_dice", False)
                         # 存储【厄兆】事件提示语
-                        self.doom_omen_messages[key] = "【厄兆】你失去了大凶骰子状态"
+                        self.risk_omen_messages[key] = "【厄兆】你失去了风险骰子状态"
                 else:
                     # 大吉：正面概率翻倍，负面概率减半
-                    self.doom_dice_results[(today, uid)] = "大吉"
+                    self.risk_dice_results[(today, uid)] = "大吉"
                     if positive:
                         prob = prob * 2.0
                     else:
@@ -9852,20 +9992,20 @@ class WifePlugin(Star):
         
         return clamp_probability(prob)
     
-    def _adjust_probability(self, prob: float, today: str, uid: str, *, positive: bool = True, apply_doom_dice: bool = True) -> float:
+    def _adjust_probability(self, prob: float, today: str, uid: str, *, positive: bool = True, apply_risk_dice: bool = True) -> float:
         """
         调整概率（兼容旧接口，内部调用统一概率计算函数）
         """
-        return self._calculate_probability(prob, today, uid, positive=positive, apply_doom_dice=apply_doom_dice)
+        return self._calculate_probability(prob, today, uid, positive=positive, apply_risk_dice=apply_risk_dice)
 
-    def _probability_check(self, prob: float, today: str, uid: str, *, positive: bool = True, apply_doom_dice: bool = True) -> bool:
-        adjusted = self._adjust_probability(prob, today, uid, positive=positive, apply_doom_dice=apply_doom_dice)
+    def _probability_check(self, prob: float, today: str, uid: str, *, positive: bool = True, apply_risk_dice: bool = True) -> bool:
+        adjusted = self._adjust_probability(prob, today, uid, positive=positive, apply_risk_dice=apply_risk_dice)
         return random.random() < adjusted
     
-    def _plain_result_with_doom_dice(self, event: AstrMessageEvent, message: str, today: str, uid: str, doom_result: str = None):
+    def _plain_result_with_risk_dice(self, event: AstrMessageEvent, message: str, today: str, uid: str, doom_result: str = None):
         """
-        生成带大凶骰子前缀的 plain_result
-        如果本次概率判定触发了大凶骰子，会在消息前添加前缀
+        生成带风险骰子前缀的 plain_result
+        如果本次概率判定触发了风险骰子，会在消息前添加前缀
         如果触发了【厄兆】事件，会同时显示【厄兆】提示语
         
         参数:
@@ -9877,10 +10017,10 @@ class WifePlugin(Star):
         """
         if doom_result is None:
             key = (today, uid)
-            doom_result = self.doom_dice_results.pop(key, None)
+            doom_result = self.risk_dice_results.pop(key, None)
         # 获取【厄兆】事件提示语
         key = (today, uid)
-        omen_message = self.doom_omen_messages.pop(key, None)
+        omen_message = self.risk_omen_messages.pop(key, None)
         
         if doom_result:
             prefix = f"【{doom_result}】"
@@ -9890,22 +10030,22 @@ class WifePlugin(Star):
                 message = f"{message}\n{omen_message}"
         return event.plain_result(message)
     
-    def _get_doom_dice_result(self, today: str, uid: str) -> str:
+    def _get_risk_dice_result(self, today: str, uid: str) -> str:
         """
-        获取并清除大凶骰子结果
+        获取并清除风险骰子结果
         返回 "大吉"、"大凶" 或 None
-        注意：此方法只返回大凶骰子结果，不返回【厄兆】事件提示语
+        注意：此方法只返回风险骰子结果，不返回【厄兆】事件提示语
         """
         key = (today, uid)
-        return self.doom_dice_results.pop(key, None)
+        return self.risk_dice_results.pop(key, None)
     
-    def _get_doom_omen_message(self, today: str, uid: str) -> str:
+    def _get_risk_omen_message(self, today: str, uid: str) -> str:
         """
         获取并清除【厄兆】事件提示语
         返回提示语字符串或 None
         """
         key = (today, uid)
-        return self.doom_omen_messages.pop(key, None)
+        return self.risk_omen_messages.pop(key, None)
     
     def _record_user_interaction(self, today: str, gid: str, uid: str, target_uid: str):
         """
@@ -9987,17 +10127,17 @@ class WifePlugin(Star):
                 omen_handler(today, target_uid, gid)
                 # 存储厄兆事件提示语（给原用户）
                 key = (today, uid)
-                self.doom_omen_messages[key] = f"【厄兆】{omen_message}（奇迹于你：已转移给{target_nick}）"
+                self.risk_omen_messages[key] = f"【厄兆】{omen_message}（奇迹于你：已转移给{target_nick}）"
             else:
                 # 没有其他群友，自己承担
                 omen_handler(today, uid, gid)
                 key = (today, uid)
-                self.doom_omen_messages[key] = f"【厄兆】{omen_message}"
+                self.risk_omen_messages[key] = f"【厄兆】{omen_message}"
         else:
             # 没有奇迹于你状态，自己承担
             omen_handler(today, uid, gid)
             key = (today, uid)
-            self.doom_omen_messages[key] = f"【厄兆】{omen_message}"
+            self.risk_omen_messages[key] = f"【厄兆】{omen_message}"
     
     def _draw_item_by_quality(self, today: str, uid: str, count: int = 1, exclude_items: set = None, cfg: dict = None, gid: str = None) -> list:
         """
@@ -10009,7 +10149,7 @@ class WifePlugin(Star):
         - count: 抽取数量
         - exclude_items: 要排除的道具集合（用于状态道具不可重复等场景）
         - cfg: 群配置字典（可选，用于计算王之宝库）
-        - gid: 群ID（可选，用于大凶骰子掷出大凶时清空老婆或道具卡）
+        - gid: 群ID（可选，用于风险骰子掷出大凶时清空老婆或道具卡）
         
         返回: 抽取的道具列表
         """
