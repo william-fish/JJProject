@@ -447,6 +447,24 @@ def clamp_probability(value) -> float:
     return max(0.0, min(0.9, val))
 
 
+def _normalize_nick(uid: str, nick: str | None) -> str:
+    """
+    标准化昵称：
+    - 去除首尾空白
+    - 过滤掉类似『用户114514』这类占位昵称（优先使用数据文件中已有 nick）
+    """
+    if not isinstance(nick, str):
+        return ""
+    n = nick.strip()
+    if not n:
+        return ""
+    # 协议端可能返回类似「用户{uid}」作为占位昵称，此处不认为是有效昵称
+    placeholder = f"用户{uid}"
+    if n == placeholder:
+        return ""
+    return n
+
+
 def _normalize_user_record(uid: str, record) -> dict:
     result = {
         "nick": f"用户{uid}",
@@ -457,7 +475,10 @@ def _normalize_user_record(uid: str, record) -> dict:
     }
     if isinstance(record, dict):
         if isinstance(record.get("nick"), str) and record["nick"].strip():
-            result["nick"] = record["nick"]
+            # 旧数据中若 nick 为占位昵称（如「用户114514」），视为无效
+            normalized_nick = _normalize_nick(uid, record["nick"])
+            if normalized_nick:
+                result["nick"] = normalized_nick
         if isinstance(record.get("date"), str):
             result["date"] = record["date"]
         if "harem" in record:
@@ -485,7 +506,9 @@ def _normalize_user_record(uid: str, record) -> dict:
                     if rec.get("harem"):
                         harem_flag = True
                     if isinstance(rec.get("nick"), str) and rec["nick"].strip():
-                        nick_value = rec["nick"]
+                        normalized_nick = _normalize_nick(uid, rec["nick"])
+                        if normalized_nick:
+                            nick_value = normalized_nick
             if group_ids:
                 result["groups"] = list(dict.fromkeys(group_ids))
             if merged_wives:
@@ -494,7 +517,9 @@ def _normalize_user_record(uid: str, record) -> dict:
             result["harem"] = harem_flag
             result["nick"] = nick_value
     result["groups"] = list(dict.fromkeys([str(g) for g in result["groups"] if g]))
-    result["nick"] = result["nick"] or f"用户{uid}"
+    # 若最终 nick 为空或为占位昵称，则退回到占位昵称
+    final_nick = _normalize_nick(uid, result["nick"])
+    result["nick"] = final_nick or f"用户{uid}"
     return result
 
 
@@ -552,8 +577,10 @@ def _migrate_old_wife_configs() -> dict:
     # 转换为新格式
     result = {}
     for uid, info in aggregated.items():
+        # 迁移旧数据时，同样过滤占位昵称，优先保留真实昵称
+        valid_nick = _normalize_nick(uid, info["nick"])
         result[uid] = {
-            "nick": info["nick"] or f"用户{uid}",
+            "nick": valid_nick or f"用户{uid}",
             "wives": info["wives"],
             "date": info["date"],
             "harem": info["harem"],
@@ -616,6 +643,7 @@ def _ensure_user_entry(uid: str, nick: str = "") -> dict:
     如果记录不存在，创建新记录；如果存在，确保格式正确
     """
     uid = str(uid)
+    nick = _normalize_nick(uid, nick)
     
     # 如果记录已存在，规范化它
     if uid in wives_data:
@@ -628,6 +656,7 @@ def _ensure_user_entry(uid: str, nick: str = "") -> dict:
         entry.setdefault("groups", [])
 
         # 更新昵称（如果提供了新的）
+        # 若 nick 为占位昵称（如「用户114514」），不会覆盖数据文件中的已有 nick
         if nick:
             entry["nick"] = nick
 
@@ -676,12 +705,15 @@ def get_group_record(uid: str, gid: str, attach: bool = False) -> dict | None:
 
 
 def ensure_group_record(uid: str, gid: str, date: str, nick: str, keep_existing: bool = False) -> dict:
-    record = get_group_record(uid, gid, attach=True) or _ensure_user_entry(uid, nick)
+    # 标准化昵称，过滤掉占位昵称（如「用户114514」），避免覆盖数据文件中的真实昵称
+    normalized_nick = _normalize_nick(str(uid), nick)
+    record = get_group_record(uid, gid, attach=True) or _ensure_user_entry(uid, normalized_nick)
     if not keep_existing and record.get("date") != date:
         record["wives"] = []
     record["date"] = date
-    if nick:
-        record["nick"] = nick
+    # 仅当昵称为有效昵称时才覆盖
+    if normalized_nick:
+        record["nick"] = normalized_nick
     _ensure_group_membership(record, gid)
     return record
 
@@ -8462,7 +8494,19 @@ class WifePlugin(Star):
     async def search_wife(self, event: AstrMessageEvent, target_uid: str | None = None):
         # 查老婆主逻辑
         gid = str(event.message_obj.group_id)
-        tid = target_uid or self.parse_target(event) or str(event.get_sender_id())
+        sender_uid = str(event.get_sender_id())
+        parsed_target = self.parse_target(event)
+        # 如果没有显式 @ 或昵称匹配，则默认查询自己
+        if target_uid:
+            tid = target_uid
+            is_self = target_uid == sender_uid
+        elif parsed_target:
+            tid = parsed_target
+            # 这里认为用户显式指定了目标，即使是自己也按“XXX的老婆是”处理
+            is_self = False
+        else:
+            tid = sender_uid
+            is_self = True
         today = get_today()
         cfg = load_group_config(gid)
         # 检查是否有老婆
@@ -8483,16 +8527,28 @@ class WifePlugin(Star):
             for idx, img in enumerate(wives, 1):
                 if img.startswith("http"):
                     display_name = self._resolve_avatar_nick(cfg, img)
-                    text = f"{owner}的第{idx}个老婆是{display_name}"
+                    if is_self:
+                        text = f"你的第{idx}个老婆是{display_name}"
+                    else:
+                        text = f"{owner}的第{idx}个老婆是{display_name}"
                 else:
                     name = os.path.splitext(img)[0]
                     if "!" in name:
                         source, chara = name.split("!", 1)
-                        text = f"{owner}的第{idx}个老婆是来自《{source}》的{chara}"
+                        if is_self:
+                            text = f"你的第{idx}个老婆是来自《{source}》的{chara}"
+                        else:
+                            text = f"{owner}的第{idx}个老婆是来自《{source}》的{chara}"
                     else:
-                        text = f"{owner}的第{idx}个老婆是{name}"
+                        if is_self:
+                            text = f"你的第{idx}个老婆是{name}"
+                        else:
+                            text = f"{owner}的第{idx}个老婆是{name}"
                 if idx == len(wives):
-                    text += f"，共有{len(wives)}个老婆，羡慕吗？"
+                    if is_self:
+                        text += f"，你总共有{len(wives)}个老婆，羡慕吗？"
+                    else:
+                        text += f"，共有{len(wives)}个老婆，羡慕吗？"
                 else:
                     text += "，"
                 image_component = self._build_image_component(img)
@@ -8504,19 +8560,31 @@ class WifePlugin(Star):
             # 普通用户：显示单个老婆
             wives = get_wives_list(cfg, tid, today)
             if not wives:
-                yield event.plain_result(f"，{owner}今天还没有老婆哦~")
+                if is_self:
+                    yield event.plain_result("你今天还没有老婆哦，快去抽一个试试吧~")
+                else:
+                    yield event.plain_result(f"，{owner}今天还没有老婆哦~")
                 return
             img = wives[0]  # 普通用户只有一个老婆
             if img.startswith("http"):
                 display_name = self._resolve_avatar_nick(cfg, img)
-                text = f"，{owner}的老婆是{display_name}，羡慕吗？"
+                if is_self:
+                    text = f"你的老婆是{display_name}，羡慕吗？"
+                else:
+                    text = f"，{owner}的老婆是{display_name}，羡慕吗？"
             else:
                 name = os.path.splitext(img)[0]
                 if "!" in name:
                     source, chara = name.split("!", 1)
-                    text = f"，{owner}的老婆是来自《{source}》的{chara}，羡慕吗？"
+                    if is_self:
+                        text = f"你的老婆是来自《{source}》的{chara}，羡慕吗？"
+                    else:
+                        text = f"，{owner}的老婆是来自《{source}》的{chara}，羡慕吗？"
                 else:
-                    text = f"，{owner}的老婆是{name}，羡慕吗？"
+                    if is_self:
+                        text = f"你的老婆是{name}，羡慕吗？"
+                    else:
+                        text = f"，{owner}的老婆是{name}，羡慕吗？"
             image_component = self._build_image_component(img)
             if image_component:
                 yield event.chain_result([Plain(text), image_component])
