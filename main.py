@@ -654,6 +654,7 @@ def _ensure_user_entry(uid: str, nick: str = "") -> dict:
         entry.setdefault("date", get_today())
         entry.setdefault("harem", False)
         entry.setdefault("groups", [])
+        entry.setdefault("last_active", get_today())
 
         # 更新昵称（如果提供了新的）
         # 若 nick 为占位昵称（如「用户114514」），不会覆盖数据文件中的已有 nick
@@ -674,6 +675,7 @@ def _ensure_user_entry(uid: str, nick: str = "") -> dict:
         "date": get_today(),
         "harem": False,
         "groups": [],
+        "last_active": get_today(),
     }
     wives_data[uid] = entry
     return entry
@@ -4493,6 +4495,11 @@ class WifePlugin(Star):
         cleanup_daily_data(today)
         uid = str(event.get_sender_id())
         
+        # 更新活跃时间
+        user_entry = _ensure_user_entry(uid, event.get_sender_name())
+        user_entry["last_active"] = today
+        save_wife_data()
+
         # 处理多重人格 (Multiple Personalities) 的每2小时重置逻辑
         eff = get_user_effects(today, uid)
         if eff["flags"].get("multiple_personalities"):
