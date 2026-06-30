@@ -2753,12 +2753,10 @@ class WifePlugin(Star):
         # 从status_item_specs自动获取所有状态，排除一些不应该出现在柏青哥中的状态
         excluded_items = {
             "贤者时间",  # 负面效果，不应该出现
-            "好兄弟",  # 需要绑定目标（状态名是"同甘共苦"），不应该出现
-            "雄竞",  # 需要绑定目标，不应该出现
             "未来日记",  # 特殊效果，不应该出现
             "吉星如意",  # 特殊效果（状态名是"超吉"），不应该出现
             "穷凶极恶",  # 需要特定条件，不应该出现
-        }
+        } | self.items_need_target
         # 排除没有item_name的状态（如"同甘共苦"对应的item_name是"好兄弟"）
         # 从status_item_specs中获取所有有item_name的状态，排除不应该出现的
         self.pachinko_state_specs = [
@@ -4582,7 +4580,15 @@ class WifePlugin(Star):
                     if k != "multiple_personalities":
                         flags[k] = False
                 if lost_states_count > 0:
-                    available_states = [spec["id"] for spec in self.status_effect_specs if "id" in spec and spec["id"] != "multiple_personalities"]
+                    exclude_ids = {
+                        "multiple_personalities", "ban_items", "positive", 
+                        "cupid_arrow", "share_bonus", "rival", "brother_bond"
+                    }
+                    available_states = [
+                        spec["id"] for spec in self.status_effect_specs 
+                        if "id" in spec and spec["id"] not in exclude_ids 
+                        and spec.get("item_name") not in self.items_need_target
+                    ]
                     if available_states:
                         new_states = random.choices(available_states, k=lost_states_count)
                         for state in new_states:
@@ -6949,7 +6955,7 @@ class WifePlugin(Star):
         if name == "其人之道":
             # 获取群内所有有flags状态的用户（排除自己）
             candidates = []
-            exclude_flags = {"ban_items"}  # 贤者时间等不应该被偷
+            exclude_flags = {"ban_items", "rival", "brother_bond", "positive", "cupid_arrow"}  # 贤者时间、情敌、同甘共苦、阳性、丘比特之箭等不应该被偷
             for target_id, rec, _ in iter_group_users(gid):
                 tid = str(target_id)
                 if tid == uid:
@@ -8127,7 +8133,7 @@ class WifePlugin(Star):
             
             # 获得随机状态（星级受概率影响，数量受二度寝翻倍）
             drawn_count = lost_count * double_factor
-            exclude_for_status = set(self.item_pool) - self.status_items
+            exclude_for_status = (set(self.item_pool) - self.status_items) | self.items_need_target
             drawn = self._draw_item_by_quality(today, uid, count=drawn_count, exclude_items=exclude_for_status, cfg=cfg, gid=gid)
             
             new_labels = []
@@ -8195,7 +8201,7 @@ class WifePlugin(Star):
                     items_text = "、".join(drawn)
                     return await finalize(True, f"安慰奖：你获得了道具卡「{items_text}」！", double_effect_used=double_active and double_factor > 1)
             elif choice == "status":
-                exclude_for_status = set(self.item_pool) - self.status_items
+                exclude_for_status = (set(self.item_pool) - self.status_items) | self.items_need_target
                 drawn = self._draw_item_by_quality(today, uid, count=1 * double_factor, exclude_items=exclude_for_status, cfg=cfg, gid=gid)
                 if drawn:
                     new_labels = []
