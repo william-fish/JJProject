@@ -2049,6 +2049,8 @@ class WifePlugin(Star):
         self.risk_omen_messages = {}
         # 认老婆挑战会话状态：键为 (gid, uid)
         self.recognize_sessions: dict[tuple[str, str], dict] = {}
+        # 翻牌子会话状态：键为 (gid, uid)
+        self.flop_sessions: dict[tuple[str, str], dict] = {}
         self.item_pool = [
             "牛魔王",
             "开后宫",
@@ -2147,6 +2149,9 @@ class WifePlugin(Star):
             "敏感肌",
             "安慰奖",
             "过期盲盒",
+            "薛定谔的猫",
+            "翻牌子",
+            "精简卡组",
         ]
         # 道具品质配置：quality值范围1-5，1为最低品质，5为最高品质
         self.item_quality = {
@@ -2242,6 +2247,9 @@ class WifePlugin(Star):
             "神的不在场证明": 4,
             "发薪日": 5,
             "博弈": 3,
+            "薛定谔的猫": 5,
+            "翻牌子": 3,
+            "精简卡组": 2,
         }
         self.items_need_target = {"雌堕", "雄竞", "勾引", "牛道具", "偷拍", "复读", "好兄弟", "月老", "最后的波纹", "好人卡", "坏逼卡", "情敌", "催眠", "博弈"}
         
@@ -2708,6 +2716,13 @@ class WifePlugin(Star):
                 "item_name": "敏感肌",
                 "checker": flag_checker("sensitive_skin"),
             },
+            {
+                "id": "schrodinger_cat",
+                "label": "薛定谔的猫",
+                "desc": "薛定谔的猫：当你使用道具卡后，重新随机你的其他所有道具卡",
+                "item_name": "薛定谔的猫",
+                "checker": flag_checker("schrodinger_cat"),
+            },
         ]
         self.status_item_specs = {
             spec["item_name"]: spec
@@ -2751,6 +2766,7 @@ class WifePlugin(Star):
             "重置牛": self.reset_ntr,
             "老婆集市": self.show_market,
             "购买": self.purchase_from_market,
+            "选择": self.choose_flop_wife,
             "重置换": self.reset_change_wife,
             "交换老婆": self.swap_wife,
             "同意交换": self.agree_swap_wife,
@@ -3683,6 +3699,13 @@ class WifePlugin(Star):
         return normalized
 
     def _answer_to_pinyin(self, text: str) -> str:
+        global lazy_pinyin
+        if lazy_pinyin is None:
+            try:
+                from pypinyin import lazy_pinyin as lp
+                lazy_pinyin = lp
+            except ImportError:
+                pass
         if not text or lazy_pinyin is None:
             return ""
         normalized = unicodedata.normalize("NFKC", text)
@@ -3690,6 +3713,25 @@ class WifePlugin(Star):
         if not filtered:
             return ""
         return "".join(lazy_pinyin(filtered, errors="ignore")).lower()
+
+    def _to_fuzzy_pinyin(self, pinyin_str: str) -> str:
+        if not pinyin_str:
+            return ""
+        # 模糊拼音映射表：用于处理同音字、前后鼻音、平翘舌音、鼻音与边音等常见拼音输入法模糊音
+        replacements = [
+            ("ang", "an"),
+            ("eng", "en"),
+            ("ing", "in"),
+            ("zh", "z"),
+            ("ch", "c"),
+            ("sh", "s"),
+            ("l", "n"),
+            ("f", "h"),
+        ]
+        res = pinyin_str
+        for src, dest in replacements:
+            res = res.replace(src, dest)
+        return res
 
     def _extract_wife_name_info(self, img: str) -> dict:
         base = os.path.splitext(os.path.basename(img))[0]
@@ -3728,13 +3770,53 @@ class WifePlugin(Star):
     def _is_recognize_answer_correct(self, question: dict, answer_text: str) -> bool:
         normalized = self._normalize_answer_text(answer_text)
         normalized_answers = question.get("normalized_answers", set())
+        
+        # 1. 尝试完全匹配（包含原有的子串/部分字匹配）
         if self._match_answer_variants(normalized, normalized_answers, min_length=2):
             return True
+            
+        # 2. 拼音匹配（完全同音匹配）
         pinyin_answers = question.get("pinyin_answers", set())
-        if pinyin_answers:
-            user_pinyin = self._answer_to_pinyin(answer_text)
+        user_pinyin = self._answer_to_pinyin(answer_text)
+        
+        if pinyin_answers and user_pinyin:
             if self._match_answer_variants(user_pinyin, pinyin_answers, min_length=4):
                 return True
+                
+            # 3. 模糊拼音匹配（支持前后鼻音、平翘舌音等错别字，例如“后藤伊利”和“后藤一里”）
+            user_fuzzy = self._to_fuzzy_pinyin(user_pinyin)
+            candidate_fuzzies = {self._to_fuzzy_pinyin(pa) for pa in pinyin_answers if pa}
+            if self._match_answer_variants(user_fuzzy, candidate_fuzzies, min_length=4):
+                return True
+
+        # 4. 文本相似度与拼音相似度容错（使用 difflib.SequenceMatcher）
+        # 用于非同音但极为相似的错别字，或者打错了一个偏旁/字（如“喜多郁代”答成“喜多郁伐”）
+        import difflib
+        for candidate in normalized_answers:
+            if not candidate:
+                continue
+            
+            # 计算文本相似度 ratio
+            text_ratio = difflib.SequenceMatcher(None, normalized, candidate).ratio()
+            
+            # 动态根据正确名字长度决定相似度阈值
+            if len(candidate) <= 2:
+                threshold = 0.85  # 2个字的名字容错极低，几乎不允许错字（但拼音同音依然可过）
+            elif len(candidate) == 3:
+                threshold = 0.66  # 3个字允许错1个字
+            else:
+                threshold = 0.60  # 4个及以上字允许错1-2个字
+                
+            if text_ratio >= threshold:
+                return True
+                
+            # 拼音相似度 ratio 检查（例如“后藤一里”houtengyili 与 “后藤一六”houtengyiliu，拼音极度相近）
+            if pinyin_answers and user_pinyin:
+                for cp in pinyin_answers:
+                    pinyin_ratio = difflib.SequenceMatcher(None, user_pinyin, cp).ratio()
+                    if pinyin_ratio >= 0.80:
+                        return True
+                        
         return False
 
     def _match_answer_variants(self, user_text: str, candidates: set[str], *, min_length: int) -> bool:
@@ -4850,8 +4932,13 @@ class WifePlugin(Star):
             pin_friend_bonus = self._count_pin_friends(today)
         
         # 按品质分组道具池
+        slim_excluded = get_user_meta(today, uid, "slim_deck_excluded", None)
+        exclude_set = set(slim_excluded) if slim_excluded else set()
+        
         quality_pools = {2: [], 3: [], 4: [], 5: []}
         for item in self.item_pool:
+            if item in exclude_set:
+                continue
             quality = self.get_item_quality(item)
             if quality in quality_pools:
                 quality_pools[quality].append(item)
@@ -6271,6 +6358,18 @@ class WifePlugin(Star):
             if is_blind_box_enthusiast:
                 now = datetime.utcnow().timestamp()
                 set_user_meta(today, uid, "last_item_use_time", now)
+            
+            # 薛定谔的猫效果：使用其他道具卡后，重新随机所有其他道具卡（注意：洗牌本身属于全部随机，不触发此效果）
+            if card_name != "洗牌" and get_user_flag(today, uid, "schrodinger_cat") and user_items:
+                other_count = len(user_items)
+                drawn_items = self._draw_item_by_quality(today, uid, count=other_count, cfg=cfg, gid=gid)
+                if drawn_items:
+                    self._record_discarded_items(today, gid, list(user_items))
+                    user_items.clear()
+                    user_items.extend(drawn_items)
+                    save_item_data()
+                    randomized_msg = f"\n「薛定谔的猫」效果发动！你拥有的其他 {other_count} 张道具卡被重新随机为：{'、'.join(drawn_items)}。"
+                    message = f"{message}\n{randomized_msg}" if message else randomized_msg
         # 检查是否有风险骰子结果需要添加到消息前缀
         doom_result = self._get_risk_dice_result(today, uid)
         omen_message = self._get_risk_omen_message(today, uid)
@@ -7863,19 +7962,15 @@ class WifePlugin(Star):
             set_user_flag(today, uid, "alibi", True)
             return await finalize(True, f"你获得了「神的不在场证明」状态！今日你对他人使用道具时，不会被记录为使用者。")
         if name == "发薪日":
-            # 自己获得2次额外机会
-            add_user_mod(today, uid, "blind_box_extra_draw", 2)
-            
-            # 其他群友获得1次额外机会
-            others_count = 0
+            # 本群所有成员（包括自己）各获得1次额外抽盲盒机会
+            total_count = 0
             for u in cfg.keys():
                 u_str = str(u)
-                if u_str != uid:
-                    add_user_mod(today, u_str, "blind_box_extra_draw", 1)
-                    others_count += 1
+                add_user_mod(today, u_str, "blind_box_extra_draw", 1)
+                total_count += 1
             
             save_effects()
-            return await finalize(True, f"发薪日到啦！你获得了2次额外抽盲盒机会，本群其他 {others_count} 位小伙伴各获得了1次额外抽盲盒机会！")
+            return await finalize(True, f"发薪日到啦！本群 {total_count} 位小伙伴（包括你）各获得了1次额外抽盲盒机会！")
         if name == "博弈":
             if not target_uid:
                 return await finalize(False, "使用「博弈」时请@目标哦~")
@@ -7935,6 +8030,75 @@ class WifePlugin(Star):
         if name == "敏感肌":
             set_user_flag(today, uid, "sensitive_skin", True)
             return await finalize(True, f"你获得了「敏感肌」状态！当别人对你使用道具卡或指令时，你将自动反击！")
+        if name == "薛定谔的猫":
+            set_user_flag(today, uid, "schrodinger_cat", True)
+            return await finalize(True, f"你获得了「薛定谔的猫」状态！当你使用其他道具卡后，你拥有的其他所有道具卡会被重新随机。")
+        if name == "精简卡组":
+            # 随机选择10张不同的道具卡，排除
+            pool = [item for item in self.item_pool if item != "精简卡组"]
+            if len(pool) <= 10:
+                return await finalize(False, "当前卡池道具卡不足，无法使用「精简卡组」。")
+            
+            chosen_excluded = random.sample(pool, 10)
+            set_user_meta(today, uid, "slim_deck_excluded", chosen_excluded)
+            
+            excluded_text = "、".join(chosen_excluded)
+            return await finalize(True, f"精简卡组使用成功！今日你将无法从任何盲盒中抽取到以下 10 张道具卡（包含保底机制）：{excluded_text}。")
+        if name == "翻牌子":
+            # 随机挑选 5 个老婆
+            images = self._list_wife_images()
+            if len(images) < 5:
+                return await finalize(False, "当前老婆素材不足，无法使用「翻牌子」。")
+            
+            random.shuffle(images)
+            selected_images = images[:5]
+            
+            # 解析名字与图片对象
+            candidates = []
+            for img in selected_images:
+                base = os.path.splitext(os.path.basename(img))[0]
+                chara_name = base
+                if "!" in base:
+                    _, chara = base.split("!", 1)
+                    chara_name = chara.strip() or base
+                candidates.append({
+                    "name": chara_name,
+                    "img": img,
+                    "raw_name": base
+                })
+            
+            # 保存到 session 中
+            session_key = (gid, uid)
+            self.flop_sessions[session_key] = {
+                "candidates": candidates,
+                "timestamp": datetime.utcnow().timestamp()
+            }
+            
+            # 生成候选老婆图片
+            try:
+                img = self._generate_flop_image(candidates)
+                temp_path = os.path.join(PLUGIN_DIR, f"flop_{uid}_{today}.png")
+                img.save(temp_path)
+                
+                # 发送图片和提示消息
+                await self._send_group_message(event, [
+                    At(qq=int(uid)),
+                    Plain(f" 以下是为你挑选的 5 位候选老婆，请回复「选择 老婆名字」来获得她吧！\n"),
+                    AstrImage.fromFileSystem(temp_path)
+                ])
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass
+            except Exception as e:
+                # 备用文字提示
+                names_str = "、".join([c["name"] for c in candidates])
+                await self._send_group_message(event, [
+                    At(qq=int(uid)),
+                    Plain(f" 以下是为你挑选的 5 位候选老婆：{names_str}。请回复「选择 老婆名字」来获得其中一位吧！")
+                ])
+                
+            return await finalize(True, f"你已翻开了 5 张牌子，正在等待选择...")
         if name == "过期盲盒":
             add_user_mod(today, uid, "blind_box_extra_draw", 1)
             msg = "你打开了过期盲盒，获得了1次额外抽盲盒机会。"
@@ -8554,14 +8718,14 @@ class WifePlugin(Star):
                 img = wives[0]  # 普通用户只有一个老婆
                 if img.startswith("http"):
                     display_name = self._resolve_avatar_nick(cfg, img)
-                    text = f"，你今天的老婆是{display_name}，请好好珍惜哦~"
+                    text = f"{nick}，你今天的老婆是{display_name}，请好好珍惜哦~"
                 else:
                     name = os.path.splitext(img)[0]
                     if "!" in name:
                         source, chara = name.split("!", 1)
-                        text = f"，你今天的老婆是来自《{source}》的{chara}，请好好珍惜哦~"
+                        text = f"{nick}，你今天的老婆是来自《{source}》的{chara}，请好好珍惜哦~"
                     else:
-                        text = f"，你今天的老婆是{name}，请好好珍惜哦~"
+                        text = f"{nick}，你今天的老婆是{name}，请好好珍惜哦~"
                 image_component = self._build_image_component(img)
                 if image_component:
                     yield event.chain_result([Plain(text), image_component])
@@ -8746,7 +8910,7 @@ class WifePlugin(Star):
         if img.startswith("http"):
             display_name = self._resolve_avatar_nick(cfg, img)
             if not text:
-                text = f"，你今天的老婆是{display_name}，请好好珍惜哦~"
+                text = f"{nick}，你今天的老婆是{display_name}，请好好珍惜哦~"
             else:
                 text += display_name
         else:
@@ -8754,12 +8918,12 @@ class WifePlugin(Star):
             if "!" in name:
                 source, chara = name.split("!", 1)
                 if not text:
-                    text = f"，你今天的老婆是来自《{source}》的{chara}，请好好珍惜哦~"
+                    text = f"{nick}，你今天的老婆是来自《{source}》的{chara}，请好好珍惜哦~"
                 else:
                     text += f"来自《{source}》的{chara}"
             else:
                 if not text:
-                    text = f"，你今天的老婆是{name}，请好好珍惜哦~"
+                    text = f"{nick}，你今天的老婆是{name}，请好好珍惜哦~"
                 else:
                     text += name
         image_component = self._build_image_component(img)
@@ -9027,6 +9191,7 @@ class WifePlugin(Star):
         # 查老婆主逻辑
         gid = str(event.message_obj.group_id)
         sender_uid = str(event.get_sender_id())
+        sender_nick = event.get_sender_name()
         parsed_target = self.parse_target(event)
         # 如果没有显式 @ 或昵称匹配，则默认查询自己
         if target_uid:
@@ -9103,7 +9268,7 @@ class WifePlugin(Star):
                 if is_self:
                     text = f"你的老婆是{display_name}，羡慕吗？"
                 else:
-                    text = f"，{owner}的老婆是{display_name}，羡慕吗？"
+                    text = f"{sender_nick}，{owner}的老婆是{display_name}，羡慕吗？"
             else:
                 name = os.path.splitext(img)[0]
                 if "!" in name:
@@ -9111,12 +9276,12 @@ class WifePlugin(Star):
                     if is_self:
                         text = f"你的老婆是来自《{source}》的{chara}，羡慕吗？"
                     else:
-                        text = f"，{owner}的老婆是来自《{source}》的{chara}，羡慕吗？"
+                        text = f"{sender_nick}，{owner}的老婆是来自《{source}》的{chara}，羡慕吗？"
                 else:
                     if is_self:
                         text = f"你的老婆是{name}，羡慕吗？"
                     else:
-                        text = f"，{owner}的老婆是{name}，羡慕吗？"
+                        text = f"{sender_nick}，{owner}的老婆是{name}，羡慕吗？"
             image_component = self._build_image_component(img)
             if image_component:
                 yield event.chain_result([Plain(text), image_component])
@@ -10799,6 +10964,13 @@ class WifePlugin(Star):
         """
         if exclude_items is None:
             exclude_items = set()
+        else:
+            exclude_items = set(exclude_items) # copy to avoid modifying caller's set
+        
+        # 精简卡组排除的道具卡
+        slim_excluded = get_user_meta(today, uid, "slim_deck_excluded", None)
+        if slim_excluded:
+            exclude_items.update(slim_excluded)
         
         # 按品质分组道具池
         quality_pools = {2: [], 3: [], 4: [], 5: []}
@@ -11218,6 +11390,202 @@ class WifePlugin(Star):
         # 顺手的事：购买后触发
         async for res in self._handle_light_fingers_on_market(today, uid, event, market):
             yield res
+
+    async def choose_flop_wife(self, event: AstrMessageEvent):
+        """选择翻牌子的老婆"""
+        today = get_today()
+        uid = str(event.get_sender_id())
+        gid = str(event.message_obj.group_id)
+        session_key = (gid, uid)
+        
+        session = self.flop_sessions.get(session_key)
+        if not session:
+            yield event.plain_result(f"{event.get_sender_name()}，你当前没有正在进行的翻牌子活动哦，请先使用「翻牌子」道具卡吧~")
+            return
+            
+        # 检查是否超时（一分钟 = 60秒）
+        now = datetime.utcnow().timestamp()
+        if now - session["timestamp"] > 60:
+            self.flop_sessions.pop(session_key, None)
+            yield event.plain_result(f"{event.get_sender_name()}，你的翻牌子活动已超时失效，请重新使用道具卡。")
+            return
+            
+        text = event.message_str.strip()
+        content = text[len("选择"):].strip()
+        if not content:
+            yield event.plain_result(f"{event.get_sender_name()}，请在「选择」后写上你要选择的老婆名称哦~")
+            return
+            
+        candidates = session["candidates"]
+        chosen = None
+        
+        # 匹配老婆名称（支持子串模糊匹配）
+        for cand in candidates:
+            if content in cand["name"] or cand["name"] in content:
+                chosen = cand
+                break
+                
+        if not chosen:
+            # 如果没通过简易子串匹配，尝试拼音匹配或继续提示
+            # 获取用户输入和候选者的拼音
+            user_pinyin = self._answer_to_pinyin(content)
+            if user_pinyin:
+                for cand in candidates:
+                    cand_pinyin = self._answer_to_pinyin(cand["name"])
+                    if cand_pinyin and (user_pinyin in cand_pinyin or cand_pinyin in user_pinyin):
+                        chosen = cand
+                        break
+                        
+        if not chosen:
+            names_str = "、".join([c["name"] for c in candidates])
+            yield event.plain_result(f"{event.get_sender_name()}，在你候选的5位老婆中没有找到「{content}」，请重新选择。可选有：{names_str}。")
+            return
+            
+        # 获得选中的老婆
+        cfg = load_group_config(gid)
+        is_harem = get_user_flag(today, uid, "harem")
+        wife_img = chosen["img"]
+        nick = event.get_sender_name()
+        
+        # 使用 data_manager transaction 保证数据一致性
+        with data_manager.transaction("wives_data"):
+            add_wife(cfg, uid, wife_img, today, nick, is_harem)
+            save_group_config(cfg)
+            
+        # 清除 session
+        self.flop_sessions.pop(session_key, None)
+        
+        # 获取展示名
+        display_name = chosen["name"]
+        raw_name = chosen["raw_name"]
+        if "!" in raw_name:
+            source, chara = raw_name.split("!", 1)
+            result_text = f"恭喜！你成功选择了来自《{source}》的老婆「{chara}」！请好好珍惜哦~"
+        else:
+            result_text = f"恭喜！你成功选择了老婆「{display_name}」！请好好珍惜哦~"
+            
+        image_component = self._build_image_component(wife_img)
+        if image_component:
+            yield event.chain_result([Plain(result_text), image_component])
+        else:
+            yield event.plain_result(result_text)
+
+    def _generate_flop_image(self, wives: list):
+        """生成翻牌子老婆候选图片"""
+        width = 800
+        padding = 30
+        slot_cols = 5
+        slot_gap = 25
+        slot_width = (width - padding * 2 - slot_gap * (slot_cols - 1)) // slot_cols
+        slot_height = max(180, int(slot_width * 1.35))
+        
+        # 尝试加载字体
+        try:
+            title_font = ImageFont.truetype("msyh.ttc", 24)
+            text_font = ImageFont.truetype("msyh.ttc", 16)
+        except:
+            try:
+                title_font = ImageFont.truetype("arial.ttf", 24)
+                text_font = ImageFont.truetype("arial.ttf", 16)
+            except:
+                title_font = ImageFont.load_default()
+                text_font = ImageFont.load_default()
+        
+        def _calc_line_height(font: ImageFont.ImageFont) -> int:
+            try:
+                bbox = font.getbbox("字")
+                return max(18, (bbox[3] - bbox[1]) + 4)
+            except:
+                try:
+                    size = font.getsize("字")
+                    return max(18, size[1] + 4)
+                except:
+                    return 20
+        
+        line_height = _calc_line_height(text_font)
+        max_wife_lines = 2
+        wife_text_height = line_height * max_wife_lines
+        
+        title_height = 40
+        total_height = padding + title_height + slot_height + wife_text_height + padding
+        
+        img = PILImage.new('RGB', (width, total_height), color=(255, 255, 255))
+        draw = ImageDraw.Draw(img)
+        
+        # 绘制标题
+        title_text = "翻牌子候选老婆"
+        title_bbox = draw.textbbox((0, 0), title_text, font=title_font)
+        title_width = title_bbox[2] - title_bbox[0]
+        draw.text(((width - title_width) // 2, padding), title_text, fill=(212, 100, 100), font=title_font)
+        
+        current_y = padding + title_height
+        
+        def _measure_text_width(text: str) -> int:
+            if not text:
+                return 0
+            try:
+                bbox = text_font.getbbox(text)
+                return bbox[2] - bbox[0]
+            except:
+                try:
+                    return text_font.getsize(text)[0]
+                except:
+                    return len(text) * 10
+
+        def _wrap_text(text: str, max_width: int, max_lines: int) -> list[str]:
+            if not text:
+                return [""]
+            lines: list[str] = []
+            idx = 0
+            length = len(text)
+            while idx < length and len(lines) < max_lines:
+                end = idx + 1
+                last_valid = idx
+                while end <= length:
+                    segment = text[idx:end]
+                    if _measure_text_width(segment) <= max_width:
+                        last_valid = end
+                        end += 1
+                        continue
+                    break
+                if last_valid == idx:
+                    last_valid = min(idx + 1, length)
+                lines.append(text[idx:last_valid])
+                idx = last_valid
+            if idx < length and lines:
+                ellipsis = "..."
+                truncated = lines[-1]
+                while truncated and _measure_text_width(truncated + ellipsis) > max_width:
+                    truncated = truncated[:-1]
+                lines[-1] = (truncated + ellipsis) if truncated else ellipsis
+            return lines or [text]
+            
+        for idx, wife in enumerate(wives):
+            col = idx
+            x = padding + col * (slot_width + slot_gap)
+            y = current_y
+            
+            # 画一个圆角矩形背景或者边框
+            draw.rectangle([x, y, x + slot_width, y + slot_height], outline=(220, 220, 220), width=1)
+            
+            # 画老婆头像
+            wife_img_path = os.path.join(IMG_DIR, wife["img"])
+            try:
+                if os.path.exists(wife_img_path):
+                    wife_img = PILImage.open(wife_img_path)
+                    wife_img = wife_img.resize((slot_width - 4, slot_height - 4), PILImage.Resampling.LANCZOS)
+                    img.paste(wife_img, (x + 2, y + 2))
+            except:
+                pass
+            
+            name_lines = _wrap_text(wife["name"], slot_width, max_wife_lines)
+            for line_idx, text_line in enumerate(name_lines):
+                line_width = _measure_text_width(text_line)
+                text_x = x + (slot_width - line_width) // 2
+                text_y = y + slot_height + 5 + line_idx * line_height
+                draw.text((text_x, text_y), text_line, fill=(50, 50, 50), font=text_font)
+                
+        return img
 
     async def show_fortune(self, event: AstrMessageEvent):
         """显示今日运势"""
