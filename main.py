@@ -2155,6 +2155,9 @@ class WifePlugin(Star):
             "空白卡",
             "保配盲盒",
             "陷阱卡",
+            "薛定谔的猫",
+            "翻牌子",
+            "精简卡组",
         ]
         # 道具品质配置：quality值范围1-5，1为最低品质，5为最高品质
         self.item_quality = {
@@ -2256,6 +2259,9 @@ class WifePlugin(Star):
             "空白卡": 2,
             "保配盲盒": 5,
             "陷阱卡": 2,
+            "薛定谔的猫": 5,
+            "翻牌子": 3,
+            "精简卡组": 2,
         }
         self.items_need_target = {"雌堕", "雄竞", "勾引", "牛道具", "偷拍", "复读", "好兄弟", "月老", "最后的波纹", "好人卡", "坏逼卡", "情敌", "催眠", "博弈", "献上忠诚", "发狂"}
         
@@ -2452,6 +2458,20 @@ class WifePlugin(Star):
                 "desc": "叠叠乐：每次获得新状态时，你当前状态每有3个则额外获得1个随机状态",
                 "item_name": "叠叠乐",
                 "checker": flag_checker("stacking_tower"),
+            },
+            {
+                "id": "guaranteed_pool",
+                "label": "保配",
+                "desc": "保配：抽盲盒时不会抽到已获得的道具卡，单次数量固定为8张",
+                "item_name": "保配盲盒",
+                "checker": flag_checker("guaranteed_pool"),
+            },
+            {
+                "id": "schrodinger_cat",
+                "label": "薛定谔的猫",
+                "desc": "薛定谔的猫：当你使用道具卡后，重新随机你的其他所有道具卡",
+                "item_name": "薛定谔的猫",
+                "checker": flag_checker("schrodinger_cat"),
             },
             {
                 "id": "do_whatever",
@@ -2721,13 +2741,6 @@ class WifePlugin(Star):
                 "desc": "敏感肌：当别人对你使用道具卡或指令时，你随机获得一张需@目标的道具卡并立即对对方使用",
                 "item_name": "敏感肌",
                 "checker": flag_checker("sensitive_skin"),
-            },
-            {
-                "id": "guaranteed_pool",
-                "label": "保配",
-                "desc": "保配：抽盲盒时不会抽到已获得的道具卡，单次数量固定为8张",
-                "item_name": "保配盲盒",
-                "checker": flag_checker("guaranteed_pool"),
             },
             {
                 "id": "rival",
@@ -5062,7 +5075,7 @@ class WifePlugin(Star):
             
             if has_guaranteed:
                 # 动态检查是否还有未获得的卡
-                current_available = [i for i in self.item_pool if i not in existing_items and i not in drawn_items]
+                current_available = [i for i in self.item_pool if i not in exclude_set and i not in existing_items and i not in drawn_items]
                 if not current_available:
                     set_user_flag(today, uid, "guaranteed_pool", False)
                     has_guaranteed = False
