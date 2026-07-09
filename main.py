@@ -2149,9 +2149,12 @@ class WifePlugin(Star):
             "敏感肌",
             "安慰奖",
             "过期盲盒",
-            "薛定谔的猫",
-            "翻牌子",
-            "精简卡组",
+            "献上忠诚",
+            "发狂",
+            "广告牌",
+            "空白卡",
+            "保配盲盒",
+            "陷阱卡",
         ]
         # 道具品质配置：quality值范围1-5，1为最低品质，5为最高品质
         self.item_quality = {
@@ -2247,11 +2250,14 @@ class WifePlugin(Star):
             "神的不在场证明": 4,
             "发薪日": 5,
             "博弈": 3,
-            "薛定谔的猫": 5,
-            "翻牌子": 3,
-            "精简卡组": 2,
+            "献上忠诚": 5,
+            "发狂": 3,
+            "广告牌": 3,
+            "空白卡": 2,
+            "保配盲盒": 5,
+            "陷阱卡": 2,
         }
-        self.items_need_target = {"雌堕", "雄竞", "勾引", "牛道具", "偷拍", "复读", "好兄弟", "月老", "最后的波纹", "好人卡", "坏逼卡", "情敌", "催眠", "博弈"}
+        self.items_need_target = {"雌堕", "雄竞", "勾引", "牛道具", "偷拍", "复读", "好兄弟", "月老", "最后的波纹", "好人卡", "坏逼卡", "情敌", "催眠", "博弈", "献上忠诚", "发狂"}
         
         # 验证所有道具都有品质定义
         for item in self.item_pool:
@@ -2379,7 +2385,7 @@ class WifePlugin(Star):
             {
                 "id": "positive",
                 "label": "阳性",
-                "desc": "阳性：当你的道具或指令成功对其他人生效时，会将自身一个状态传染给对方（优先低星状态）；且每当你使用道具时，你会失去一个随机状态（有50%概率优先失去高星状态）",
+                "desc": "阳性：当你的道具或指令成功对其他人生效时，会将自身一个状态传染给对方（优先低星状态）；且每当你使用道具成功后，有35%概率随机失去一个状态（包括阳性状态本身，即有概率痊愈，且有50%概率优先失去高星状态）",
                 "checker": flag_checker("positive"),
             },
             {
@@ -2399,7 +2405,7 @@ class WifePlugin(Star):
             {
                 "id": "blind_box_enthusiast",
                 "label": "盲盒爱好者",
-                "desc": "盲盒爱好者：今日每4小时可免费抽一次盲盒并清空现有道具，抽盲盒时暴击率降低50%，且每10分钟仅能使用一个道具",
+                "desc": "盲盒爱好者：今日每2小时可免费抽一次盲盒并清空现有道具，抽盲盒时暴击率降低50%，且每3分钟仅能使用一个道具",
                 "item_name": "囤囤鼠",
                 "checker": flag_checker("blind_box_enthusiast"),
             },
@@ -2471,7 +2477,7 @@ class WifePlugin(Star):
             {
                 "id": "magic_circuit",
                 "label": "魔术回路",
-                "desc": "魔术回路：当你今天背包里没有道具卡时，会立刻获得一张随机道具卡（每日最多触发10次）",
+                "desc": "魔术回路：当你今天背包里没有道具卡时，会立刻获得一张随机道具卡（每日最多触发20次）",
                 "item_name": "trace-on",
                 "checker": flag_checker("magic_circuit"),
             },
@@ -2516,7 +2522,7 @@ class WifePlugin(Star):
             {
                 "id": "cheat",
                 "label": "老千",
-                "desc": "老千：你抽盲盒或使用道具时，30%概率（受概率效果影响）获得一张随机道具卡，且洗牌时获得的道具卡数量翻倍，且荷官状态计数需求降低",
+                "desc": "老千：你抽盲盒或使用道具时，30%概率（受概率效果影响）获得一张随机道具卡，且洗牌时获得的道具卡数量增加，且荷官状态计数需求降低",
                 "item_name": "出千",
                 "checker": flag_checker("cheat"),
             },
@@ -2717,11 +2723,19 @@ class WifePlugin(Star):
                 "checker": flag_checker("sensitive_skin"),
             },
             {
-                "id": "schrodinger_cat",
-                "label": "薛定谔的猫",
-                "desc": "薛定谔的猫：当你使用道具卡后，重新随机你的其他所有道具卡",
-                "item_name": "薛定谔的猫",
-                "checker": flag_checker("schrodinger_cat"),
+                "id": "guaranteed_pool",
+                "label": "保配",
+                "desc": "保配：抽盲盒时不会抽到已获得的道具卡，单次数量固定为8张",
+                "item_name": "保配盲盒",
+                "checker": flag_checker("guaranteed_pool"),
+            },
+            {
+                "id": "rival",
+                "label": "情敌",
+                "desc": "情敌：与他人互为情敌，抽老婆时有概率将对方的老婆抢过来",
+                "item_name": "情敌",
+                "checker": flag_checker("rival"),
+                "desc_generator": lambda today, uid, gid, plugin=self: plugin._rival_desc_generator(today, uid, gid),
             },
         ]
         self.status_item_specs = {
@@ -2741,12 +2755,10 @@ class WifePlugin(Star):
         # 从status_item_specs自动获取所有状态，排除一些不应该出现在柏青哥中的状态
         excluded_items = {
             "贤者时间",  # 负面效果，不应该出现
-            "好兄弟",  # 需要绑定目标（状态名是"同甘共苦"），不应该出现
-            "雄竞",  # 需要绑定目标，不应该出现
             "未来日记",  # 特殊效果，不应该出现
             "吉星如意",  # 特殊效果（状态名是"超吉"），不应该出现
             "穷凶极恶",  # 需要特定条件，不应该出现
-        }
+        } | self.items_need_target
         # 排除没有item_name的状态（如"同甘共苦"对应的item_name是"好兄弟"）
         # 从status_item_specs中获取所有有item_name的状态，排除不应该出现的
         self.pachinko_state_specs = [
@@ -4187,22 +4199,20 @@ class WifePlugin(Star):
         
         return None
     
-    async def _handle_dingdong_effect(self, today: str, uid: str, target_uids: str | list[str], gid: str):
+    async def _handle_dingdong_effect(self, today: str, uid: str, target_uids: str | list[str], gid: str) -> str:
         """
-        处理叮咚鸡/阳性传播效果：
-        - 当你的道具或指令成功对其他人生效时，将自身一个状态传染给对方（优先低星状态）。
-        - 若当前为叮咚鸡状态，每次传播后有10%（负面概率）获得阳性状态并失去叮咚鸡。
+        处理叮咚鸡/阳性传播效果，并返回传播的描述消息。
         """
         has_dingdong = get_user_flag(today, uid, "dingdong")
         has_positive = get_user_flag(today, uid, "positive")
         if not has_dingdong and not has_positive:
-            return
+            return ""
 
         # 规范化目标列表
         if isinstance(target_uids, str):
             target_uids = [target_uids] if target_uids else []
         elif not target_uids:
-            return
+            return ""
 
         # 收集自身当前拥有的状态（带 item_name 的 flag）
         eff = get_user_effects(today, uid)
@@ -4219,19 +4229,34 @@ class WifePlugin(Star):
             candidates.append((sid, quality))
 
         if not candidates:
-            return
+            return ""
 
         # 优先低星：从拥有的状态中选出品质最低的一档，再随机一个
         min_quality = min(q for _, q in candidates)
         low_quality_states = [sid for sid, q in candidates if q == min_quality]
         if not low_quality_states:
-            return
+            return ""
         chosen_state = random.choice(low_quality_states)
+        
+        # 查找状态的中文显示名字
+        state_label = chosen_state
+        for spec in self.status_effect_specs:
+            if spec.get("id") == chosen_state:
+                state_label = spec.get("label", chosen_state)
+                break
 
-        # 为所有目标赋予该状态（不影响自己）
+        cfg = load_group_config(gid)
+        infect_nicks = []
         for target_uid in target_uids:
             if target_uid and target_uid != uid:
                 set_user_flag(today, target_uid, chosen_state, True)
+                t_info = cfg.get(target_uid, {})
+                t_nick = t_info.get("nick", f"用户{target_uid}") if isinstance(t_info, dict) else f"用户{target_uid}"
+                infect_nicks.append(t_nick)
+
+        msg_parts = []
+        if infect_nicks:
+            msg_parts.append(f"【叮咚鸡传染】你将身上的「{state_label}」状态传染给了：{', '.join(infect_nicks)}！")
 
         # 叮咚鸡特殊效果：每次使用道具或传播状态时，有10%负面概率获得阳性并失去叮咚鸡
         if has_dingdong:
@@ -4249,6 +4274,9 @@ class WifePlugin(Star):
                 # 获得阳性，失去叮咚鸡
                 set_user_flag(today, uid, "dingdong", False)
                 set_user_flag(today, uid, "positive", True)
+                msg_parts.append("【叮咚鸡突变】因为频繁传播状态，你的叮咚鸡发生了变异，你失去了「叮咚鸡」状态，并获得了「阳性」状态！")
+
+        return "\n".join(msg_parts) if msg_parts else ""
 
     def _grant_fortune_bond_wife_reward(self, today: str, uid: str, count: int, gid: str = None):
         reward_count = int(count or 0)
@@ -4327,13 +4355,13 @@ class WifePlugin(Star):
 
     def _maybe_trigger_magic_circuit(self, today: str, uid: str):
         """
-        魔术回路效果：当用户今天没有道具卡时，立即发放一张随机道具卡（每日最多10次）
+        魔术回路效果：当用户今天没有道具卡时，立即发放一张随机道具卡（每日最多20次）
         返回获得的道具名称，若未触发则返回None
         """
         if not get_user_flag(today, uid, "magic_circuit"):
             return None
         trigger_count = int(get_user_meta(today, uid, "magic_circuit_triggers", 0) or 0)
-        if trigger_count >= 10:
+        if trigger_count >= 20:
             return None
         today_items = item_data.setdefault(today, {})
         user_items = today_items.setdefault(uid, [])
@@ -4345,9 +4373,19 @@ class WifePlugin(Star):
         if not drawn:
             return None
         new_card = drawn[0]
+        
+        # 5% 的几率变为空白卡
+        is_fake = False
+        if random.random() < 0.05:
+            new_card = "空白卡"
+            is_fake = True
+            
         user_items.append(new_card)
         save_item_data()
         set_user_meta(today, uid, "magic_circuit_triggers", trigger_count + 1)
+        
+        if is_fake:
+            return "空白卡[FAKE]"
         return new_card
     
     def _convert_change_to_draw_for_harem(self, today: str, uid: str, gid: str, amount: int):
@@ -4611,7 +4649,15 @@ class WifePlugin(Star):
                     if k != "multiple_personalities":
                         flags[k] = False
                 if lost_states_count > 0:
-                    available_states = [spec["id"] for spec in self.status_effect_specs if "id" in spec and spec["id"] != "multiple_personalities"]
+                    exclude_ids = {
+                        "multiple_personalities", "ban_items", "positive", 
+                        "cupid_arrow", "share_bonus", "rival", "brother_bond"
+                    }
+                    available_states = [
+                        spec["id"] for spec in self.status_effect_specs 
+                        if "id" in spec and spec["id"] not in exclude_ids 
+                        and spec.get("item_name") not in self.items_need_target
+                    ]
                     if available_states:
                         new_states = random.choices(available_states, k=lost_states_count)
                         for state in new_states:
@@ -4842,23 +4888,23 @@ class WifePlugin(Star):
                 yield event.plain_result(f"{event.get_sender_name()}，光盘行动：你还有未使用的道具卡，请先使用完所有道具卡后再抽盲盒哦~")
                 return
         
-        # 检查盲盒爱好者状态：每4小时可以免费抽一次盲盒
+        # 检查盲盒爱好者状态：每2小时可以免费抽一次盲盒
         is_blind_box_enthusiast = get_user_flag(today, uid, "blind_box_enthusiast")
         if is_blind_box_enthusiast:
             now = datetime.utcnow().timestamp()
             last_free_draw = get_user_meta(today, uid, "last_free_blind_box_draw", 0)
-            four_hours_ago = now - 14400  # 4小时 = 14400秒
+            two_hours_ago = now - 7200  # 2小时 = 7200秒
             
-            if last_free_draw > four_hours_ago:
-                # 距离上次免费抽盲盒不足4小时
-                wait_seconds = int(14400 - (now - last_free_draw))
+            if last_free_draw > two_hours_ago:
+                # 距离上次免费抽盲盒不足2小时
+                wait_seconds = int(7200 - (now - last_free_draw))
                 wait_hours = wait_seconds // 3600
                 wait_mins = (wait_seconds % 3600) // 60
                 if wait_hours > 0:
                     wait_text = f"{wait_hours}小时{wait_mins}分钟"
                 else:
                     wait_text = f"{wait_mins}分钟"
-                yield event.plain_result(f"{event.get_sender_name()}，你作为盲盒爱好者，每4小时可以免费抽一次盲盒，请等待{wait_text}后再试~")
+                yield event.plain_result(f"{event.get_sender_name()}，你作为盲盒爱好者，每2小时可以免费抽一次盲盒，请等待{wait_text}后再试~")
                 return
             
             # 可以免费抽盲盒，记录本次时间
@@ -5009,17 +5055,29 @@ class WifePlugin(Star):
         
         # 获取保底计数
         pity_count = get_pity_count(uid)
+        has_guaranteed = get_user_flag(today, uid, "guaranteed_pool")
         
         while pending_batches > 0:
             pending_batches -= 1
+            
+            if has_guaranteed:
+                # 动态检查是否还有未获得的卡
+                current_available = [i for i in self.item_pool if i not in existing_items and i not in drawn_items]
+                if not current_available:
+                    set_user_flag(today, uid, "guaranteed_pool", False)
+                    has_guaranteed = False
+            
             # 本批次决定抽取的道具数量（应用永久加成）
-            base_empty_prob = 0.2 - empty_reduction_bonus  # 空抽概率，最低为0
-            base_empty_prob = max(0.0, min(1.0, base_empty_prob))
-            if self._probability_check(base_empty_prob, today, uid, positive=False):
-                batch_count = 0
+            if has_guaranteed:
+                batch_count = 8
             else:
-                max_count = 5 + item_count_bonus + pin_friend_bonus
-                batch_count = random.randint(1, max_count)
+                base_empty_prob = 0.2 - empty_reduction_bonus  # 空抽概率，最低为0
+                base_empty_prob = max(0.0, min(1.0, base_empty_prob))
+                if self._probability_check(base_empty_prob, today, uid, positive=False):
+                    batch_count = 0
+                else:
+                    max_count = 5 + item_count_bonus + pin_friend_bonus
+                    batch_count = random.randint(1, max_count)
             
             # 判断当前批次是否为暴击批次（在抽取前判断）
             is_crit_batch = crit_times > 0 or (pachinko_777 and not pachinko_777_used)
@@ -5031,6 +5089,8 @@ class WifePlugin(Star):
                 for item in quality_pools[5]:
                     # 如果是状态道具且已抽取过，跳过
                     if item in self.status_items and item in drawn_status:
+                        continue
+                    if has_guaranteed and (item in existing_items or item in drawn_items):
                         continue
                     quality_5_items.append(item)
                 
@@ -5069,6 +5129,8 @@ class WifePlugin(Star):
                     # 如果是状态道具且已抽取过，跳过
                     if item in self.status_items and item in drawn_status:
                         continue
+                    if has_guaranteed and (item in existing_items or item in drawn_items):
+                        continue
                     available_items.append(item)
                 
                 if not available_items:
@@ -5077,6 +5139,8 @@ class WifePlugin(Star):
                     for q in [2, 3, 4, 5]:
                         for item in quality_pools[q]:
                             if item in self.status_items and item in drawn_status:
+                                continue
+                            if has_guaranteed and (item in existing_items or item in drawn_items):
                                 continue
                             all_available.append(item)
                     if not all_available:
@@ -5106,9 +5170,12 @@ class WifePlugin(Star):
                     pity_count += 1
             
             # 暴击检查（应用永久加成，777效果：必定触发一次）
-            base_crit_rate = 0.20 + crit_rate_bonus
+            # 盲盒基础暴击率减少到10%
+            base_crit_rate = 0.10 + crit_rate_bonus
             if get_user_flag(today, uid, "blind_box_enthusiast"):
                 base_crit_rate = base_crit_rate * 0.50
+            # 连续暴击几率递减：每次暴击后都会减少当次抽盲盒的暴击率的20%
+            base_crit_rate = base_crit_rate * (0.8 ** crit_times)
             base_crit_rate = min(1.0, base_crit_rate)  # 暴击率最高100%
             should_crit = False
             if pachinko_777 and not pachinko_777_used:
@@ -6228,23 +6295,23 @@ class WifePlugin(Star):
             yield event.plain_result(f"{event.get_sender_name()}，你正处于「贤者时间」，2小时内无法使用任何道具卡哦~")
             return
         
-        # 检查盲盒爱好者状态：每10分钟只能使用一个道具
+        # 检查盲盒爱好者状态：每3分钟只能使用一个道具
         is_blind_box_enthusiast = get_user_flag(today, uid, "blind_box_enthusiast")
         if is_blind_box_enthusiast:
             now = datetime.utcnow().timestamp()
             last_item_use = get_user_meta(today, uid, "last_item_use_time", 0)
-            ten_minutes_ago = now - 600  # 10分钟 = 600秒
+            three_minutes_ago = now - 180  # 3分钟 = 180秒
             
-            if last_item_use > ten_minutes_ago:
-                # 距离上次使用道具不足10分钟
-                wait_seconds = int(600 - (now - last_item_use))
+            if last_item_use > three_minutes_ago:
+                # 距离上次使用道具不足3分钟
+                wait_seconds = int(180 - (now - last_item_use))
                 wait_mins = wait_seconds // 60
                 wait_secs = wait_seconds % 60
                 if wait_mins > 0:
                     wait_text = f"{wait_mins}分{wait_secs}秒"
                 else:
                     wait_text = f"{wait_secs}秒"
-                yield event.plain_result(f"{event.get_sender_name()}，你作为盲盒爱好者，每10分钟只能使用一个道具，请等待{wait_text}后再试~")
+                yield event.plain_result(f"{event.get_sender_name()}，你作为盲盒爱好者，每3分钟只能使用一个道具，请等待{wait_text}后再试~")
                 return
         text = event.message_str.strip()
         content = text[len("使用") :].strip()
@@ -6328,7 +6395,10 @@ class WifePlugin(Star):
                             message = f"{message}\n{cancel_msg}" if message else cancel_msg
                 bonus_card = self._maybe_trigger_magic_circuit(today, uid)
                 if bonus_card:
-                    extra_msg = f"魔术回路发动！你获得了随机道具卡「{bonus_card}」。"
+                    if bonus_card.endswith("[FAKE]"):
+                        extra_msg = "魔术回路发动！你获得了赝品..."
+                    else:
+                        extra_msg = f"魔术回路发动！你获得了随机道具卡「{bonus_card}」。"
                     message = f"{message}\n{extra_msg}" if message else extra_msg
                     if get_user_flag(today, uid, "cheat") and self._probability_check(0.3, today, uid, positive=True):
                         doom_result = self._get_risk_dice_result(today, uid)
@@ -6479,42 +6549,80 @@ class WifePlugin(Star):
                     message = f"{message}\n{cupid_msg}"
                 elif cupid_msg:
                     message = cupid_msg
-                await self._handle_dingdong_effect(today, uid, str(target_uid), gid)
-            # 阳性状态：每次使用道具时失去一个随机状态（50%负面概率优先高星状态，否则任意状态）
+                
+                dingdong_msg = await self._handle_dingdong_effect(today, uid, str(target_uid), gid)
+                if dingdong_msg and message:
+                    message = f"{message}\n{dingdong_msg}"
+                elif dingdong_msg:
+                    message = dingdong_msg
+            # 阳性状态：每次使用道具成功后，有 35% 的概率（负面概率，受运势等影响）随机失去一个状态（包括阳性状态本身）
             if success_flag and get_user_flag(today, uid, "positive"):
-                eff_pos = get_user_effects(today, uid)
-                flags_pos = eff_pos.get("flags", {})
-                # 收集当前所有已激活状态（带 item_name 的）
-                candidates_all: list[tuple[str, int]] = []
-                for spec in self.status_effect_specs:
-                    sid = spec.get("id")
-                    if not sid or not flags_pos.get(sid):
-                        continue
-                    item_name = spec.get("item_name")
-                    if not item_name:
-                        continue
-                    quality = self.get_item_quality(item_name)
-                    candidates_all.append((sid, quality))
-                if candidates_all:
-                    # 50%负面概率：优先高星状态
-                    base_prob = 0.5
-                    prob = self._calculate_probability(
-                        base_prob, today, uid,
-                        gain_multiplier=1.0,
-                        apply_special=True,
-                        apply_final=True,
-                        positive=False,
-                        gid=gid,
-                    )
-                    prefer_high = random.random() < prob
-                    if prefer_high:
-                        max_q = max(q for _, q in candidates_all)
-                        pool = [sid for sid, q in candidates_all if q == max_q]
-                    else:
-                        pool = [sid for sid, _ in candidates_all]
-                    if pool:
-                        lose_sid = random.choice(pool)
-                        set_user_flag(today, uid, lose_sid, False)
+                # 概率触发损耗（基础35%，受运势调整）
+                loss_trigger_prob = self._calculate_probability(
+                    0.35, today, uid,
+                    gain_multiplier=1.0,
+                    apply_special=True,
+                    apply_final=True,
+                    positive=False,
+                    gid=gid
+                )
+                if random.random() < loss_trigger_prob:
+                    eff_pos = get_user_effects(today, uid)
+                    flags_pos = eff_pos.get("flags", {})
+                    # 收集当前所有已激活状态（带 item_name 的，以及阳性状态本身）
+                    candidates_all: list[tuple[str, int]] = []
+                    for spec in self.status_effect_specs:
+                        sid = spec.get("id")
+                        if not sid or not flags_pos.get(sid):
+                            continue
+                        
+                        # 阳性状态本身也可以被随机失去（判定为3星品质）
+                        if sid == "positive":
+                            candidates_all.append((sid, 3))
+                            continue
+                            
+                        item_name = spec.get("item_name")
+                        if not item_name:
+                            continue
+                        quality = self.get_item_quality(item_name)
+                        candidates_all.append((sid, quality))
+                        
+                    if candidates_all:
+                        # 50%负面概率：优先高星状态
+                        base_prob = 0.5
+                        prob = self._calculate_probability(
+                            base_prob, today, uid,
+                            gain_multiplier=1.0,
+                            apply_special=True,
+                            apply_final=True,
+                            positive=False,
+                            gid=gid,
+                        )
+                        prefer_high = random.random() < prob
+                        if prefer_high:
+                            max_q = max(q for _, q in candidates_all)
+                            pool = [sid for sid, q in candidates_all if q == max_q]
+                        else:
+                            pool = [sid for sid, _ in candidates_all]
+                        if pool:
+                            lose_sid = random.choice(pool)
+                            set_user_flag(today, uid, lose_sid, False)
+                            
+                            # 查找状态的中文显示名字
+                            lose_label = lose_sid
+                            for spec in self.status_effect_specs:
+                                if spec.get("id") == lose_sid:
+                                    lose_label = spec.get("label", lose_sid)
+                                    break
+                                    
+                            if lose_sid == "positive":
+                                positive_msg = f"【阳性痊愈】因为你处于「阳性」状态，你使用道具时有概率失去了一个状态。你非常幸运地失去了「阳性」状态，你康复了！"
+                            else:
+                                positive_msg = f"【阳性损耗】因为你处于「阳性」状态，你使用道具时有概率失去了一个状态：你随机失去了状态「{lose_label}」！"
+                            if message:
+                                message = f"{message}\n{positive_msg}"
+                            else:
+                                message = positive_msg
             # 品鉴中状态：每当你使用道具时，50%概率使随机一个群友获得"拼友"状态
             if success_flag and get_user_flag(today, uid, "tasting"):
                 # 50%概率（正面概率，受加成影响）
@@ -6604,7 +6712,7 @@ class WifePlugin(Star):
             set_user_flag(today, uid, "ntr_override", True)
             base_total = (self.ntr_max or 0) + int(get_user_mod(today, uid, "ntr_extra_uses", 0))
             if base_total > 0:
-                add_user_mod(today, uid, "ntr_extra_uses", base_total)
+                add_user_mod(today, uid, "ntr_extra_uses", base_total * double_factor)
             save_effects()
             result = f"牛魔王发动！今日牛成功率UP，牛老婆次数翻倍，但你的老婆也更容易被牛走......"
             return await finalize(True, result, double_effect_used=double_active and double_factor > 1)
@@ -6665,7 +6773,12 @@ class WifePlugin(Star):
                         message = f"{message}\n{cupid_msg}"
                     elif cupid_msg:
                         message = cupid_msg
-                    await self._handle_dingdong_effect(today, uid, affected_targets, gid)
+                    
+                    dingdong_msg = await self._handle_dingdong_effect(today, uid, affected_targets, gid)
+                    if dingdong_msg and message:
+                        message = f"{message}\n{dingdong_msg}"
+                    elif dingdong_msg:
+                        message = dingdong_msg
             return await finalize(success, message)
         # ⑤ 纯爱战士：今日不可被牛走，且无法使用换老婆
         if name == "纯爱战士":
@@ -6753,14 +6866,15 @@ class WifePlugin(Star):
             for key in list(flags.keys()):
                 flags[key] = False
             save_effects()
-            # 每失去1个状态，获得1张随机道具卡
-            gained = self._grant_random_items(today, uid, lost_count)
+            # 每失去1个状态，获得随机道具卡（数量受二度寝翻倍）
+            gained_count = lost_count * double_factor
+            gained = self._grant_random_items(today, uid, gained_count)
             if gained:
                 gained_text = "、".join(gained)
-                msg = f"你已重获新生！你失去了全部 {lost_count} 个状态，并获得了{lost_count}张随机道具卡：{gained_text}。"
+                msg = f"你已重获新生！你失去了全部 {lost_count} 个状态，并获得了 {gained_count} 张随机道具卡：{gained_text}。"
             else:
                 msg = f"你已重获新生！你失去了全部 {lost_count} 个状态，但当前卡池为空，未能获得新的道具卡。"
-            return await finalize(True, msg)
+            return await finalize(True, msg, double_effect_used=double_active and double_factor > 1)
         if name == "拖延症":
             # 失去所有指令次数：将当前所有指令相关额外次数清零，并将这些次数存为下一天的额外次数
             eff = get_user_effects(today, uid)
@@ -6815,11 +6929,13 @@ class WifePlugin(Star):
             return await finalize(True, f"左右开弓就绪！你每次换老婆后都会随机对群友强制发动一次牛老婆，而且不消耗次数。")
         if name == "谁问你了":
             set_user_flag(today, uid, "zero_attention", True)
-            # 设置3小时过期时间（3小时 = 10800秒）
+            # 持续时间受二度寝翻倍（原为3小时，即10800秒）
+            duration = 10800 * double_factor
             eff = get_user_effects(today, uid)
-            eff["meta"]["zero_attention_expire_ts"] = datetime.utcnow().timestamp() + 10800
+            eff["meta"]["zero_attention_expire_ts"] = datetime.utcnow().timestamp() + duration
             save_effects()
-            return await finalize(True, f"0人问你状态生效！3小时内别人@不到你，悠闲摸鱼去吧。")
+            hours = int(duration / 3600)
+            return await finalize(True, f"0人问你状态生效！{hours}小时内别人@不到你，悠闲摸鱼去吧。", double_effect_used=double_active and double_factor > 1)
         if name == "接盘侠":
             set_user_flag(today, uid, "cuckold", True)
             set_user_meta(today, uid, "cuckold_group", gid)
@@ -6925,7 +7041,7 @@ class WifePlugin(Star):
         if name == "其人之道":
             # 获取群内所有有flags状态的用户（排除自己）
             candidates = []
-            exclude_flags = {"ban_items"}  # 贤者时间等不应该被偷
+            exclude_flags = {"ban_items", "rival", "brother_bond", "positive", "cupid_arrow"}  # 贤者时间、情敌、同甘共苦、阳性、丘比特之箭等不应该被偷
             for target_id, rec, _ in iter_group_users(gid):
                 tid = str(target_id)
                 if tid == uid:
@@ -6936,12 +7052,12 @@ class WifePlugin(Star):
                 if has_flag:
                     candidates.append(tid)
             
-            select_num = 2
+            select_num = 2 * double_factor
             if len(candidates) < 1:
                 return await finalize(False, f"当前群内没有拥有状态的用户，无法使用「其人之道」。")
             if len(candidates) < select_num:
                 select_num = len(candidates)
-            # 随机选择两个用户
+            # 随机选择用户
             selected_targets = random.sample(candidates, select_num)
             stolen_states = []
             
@@ -6992,7 +7108,7 @@ class WifePlugin(Star):
                 state_msgs.append(f"从{target_nick}偷取了「{state_name}」")
             
             msg = f"其人之道发动！" + "、".join(state_msgs) + "。"
-            return await finalize(True, msg)
+            return await finalize(True, msg, double_effect_used=double_active and double_factor > 1)
         if name == "谜语人":
             set_user_flag(today, uid, "riddler", True)
             return await finalize(True, f"谜语人滚出克！今日他人对你使用的指令或道具以及你使用的指令或道具@的目标将随机化（不会随机到没有任何数据的用户）")
@@ -7009,8 +7125,8 @@ class WifePlugin(Star):
             user_eff = get_user_effects(today, uid)
             user_flags = user_eff.get("flags", {})
             
-            # 收集所有活跃的flags（排除一些不应该转移的状态）
-            exclude_flags = {"ban_items"}  # 贤者时间不应该被转移
+            # 收集所有活跃的flags（排除一些不应该转移的状态和辅助状态）
+            exclude_flags = {"ban_items", "ban_reject_swap"}  # 贤者时间不转移，禁止拒绝交换作为苦主附带状态不单独转移
             active_flags = [flag_key for flag_key, flag_value in user_flags.items() 
                            if flag_value and flag_key not in exclude_flags]
             
@@ -7028,6 +7144,12 @@ class WifePlugin(Star):
                 set_user_flag(today, uid, flag_key, False, propagate=False)
                 # 添加到目标用户
                 set_user_flag(today, target_uid, flag_key, True, propagate=False)
+                
+                # 特殊处理：如果是转移苦主状态，则需要同时转移其附带的禁止拒绝交换标志
+                if flag_key == "victim_auto_ntr":
+                    set_user_flag(today, uid, "ban_reject_swap", False, propagate=False)
+                    set_user_flag(today, target_uid, "ban_reject_swap", True, propagate=False)
+                    
                 # 获取状态名称
                 state_name = next((spec["label"] for spec in self.status_effect_specs 
                                   if spec.get("id") == flag_key), flag_key)
@@ -7122,11 +7244,12 @@ class WifePlugin(Star):
                 target_nick = target_info.get("nick", f"用户{target_uid}") if isinstance(target_info, dict) else f"用户{target_uid}"
                 target_nick_info = f"，{target_nick}获得了「见者有份」效果"
                 affected_targets.append(str(target_uid))
-            # 爱神 & 叮咚鸡状态：给受影响的目标赋予对应效果
             cupid_msg = None
             if affected_targets:
                 cupid_msg = await self._handle_cupid_effect(today, uid, affected_targets, gid)
-                await self._handle_dingdong_effect(today, uid, affected_targets, gid)
+                dingdong_msg = await self._handle_dingdong_effect(today, uid, affected_targets, gid)
+                if dingdong_msg:
+                    cupid_msg = f"{cupid_msg}\n{dingdong_msg}" if cupid_msg else dingdong_msg
             msg = f"你成为了富哥，今日额外获得{2 * double_factor}次老婆集市购买机会{target_nick_info}。"
             if cupid_msg:
                 msg = f"{msg}\n{cupid_msg}"
@@ -7450,9 +7573,9 @@ class WifePlugin(Star):
             target_items = list(today_items.get(target_uid, []))
             if not target_items:
                 return await finalize(False, f"对方今天还没有道具可以被牛走。")
-            steal_count = min(random.randint(0, 2), len(target_items))
+            steal_count = min(random.randint(0, 2) * double_factor, len(target_items))
             if steal_count == 0:
-                return await finalize(True, f"{equal_rights_msg}你伸出黑手，但尴尬地牵到了对方的手，牛道具失败了......")
+                return await finalize(True, f"{equal_rights_msg}你伸出黑手，但尴尬地牵到了对方的手，牛道具失败了......", double_effect_used=double_active and double_factor > 1)
             stolen = random.sample(target_items, steal_count)
             for itm in stolen:
                 target_items.remove(itm)
@@ -7466,9 +7589,14 @@ class WifePlugin(Star):
             target_info = cfg.get(target_uid, {})
             target_nick = target_info.get("nick", f"用户{target_uid}") if isinstance(target_info, dict) else f"用户{target_uid}"
             msg = f"{equal_rights_msg}你对{target_nick}使用「牛道具」成功，掠走了：{'、'.join(stolen)}。"
+            
+            # 触发陷阱卡检查
+            trap_msg = self._check_and_trigger_trap(today, target_uid, uid, stolen, gid)
+            if trap_msg:
+                msg += trap_msg
             if target_fortune_msg:
                 msg += f"\n{target_nick}{target_fortune_msg.replace('祸福相依：', '的祸福相依：')}"
-            return await finalize(True, msg)
+            return await finalize(True, msg, double_effect_used=double_active and double_factor > 1)
         if name == "偷拍":
             if not target_uid:
                 return False, "使用「偷拍」时请@目标用户哦~"
@@ -7769,7 +7897,7 @@ class WifePlugin(Star):
         # ④ 儒夫：今天你获得10次"打老婆"使用次数
         if name == "儒夫":
             add_user_mod(today, uid, "beat_wife_uses", 10 * double_factor)
-            return await finalize(True, f"儒家思想已融入你的血液，你今天获得了{10 * double_factor}次「打老婆」的使用次数。")
+            return await finalize(True, f"儒家思想已融入你的血液，你今天获得了{10 * double_factor}次「打老婆」的使用次数。", double_effect_used=double_active and double_factor > 1)
         # ⑤ 熊出没：今天你可以使用"勾引"指令无数次，但每次使用有25%概率被禁言120秒
         if name == "熊出没":
             add_user_mod(today, uid, "seduce_uses", -1)  # -1表示无限
@@ -7785,7 +7913,7 @@ class WifePlugin(Star):
             if get_user_flag(today, uid, "ntr_override"):
                 bonus_uses = bonus_uses * 2
             add_user_mod(today, uid, "ntr_extra_uses", bonus_uses)
-            return await finalize(True, f"宝刀未老！你今天额外获得{bonus_uses}次「牛老婆」机会。")
+            return await finalize(True, f"宝刀未老！你今天额外获得{bonus_uses}次「牛老婆」机会。", double_effect_used=double_active and double_factor > 1)
         if name == "龙王":
             lost_wives = get_user_meta(today, uid, "lost_wives", [])
             if not isinstance(lost_wives, list) or len(lost_wives) < 1:
@@ -7799,7 +7927,7 @@ class WifePlugin(Star):
                     rec["wives"].append(w)
             set_user_meta(today, uid, "lost_wives", [])
             save_group_config(cfg)
-            return await finalize(True, f"龙王降临！你开启了后宫模式，并取回了所有被牛走的老婆。")
+            return await finalize(True, f"龙王降临！你开启了后宫模式，并取回了所有被牛走的老婆。", double_effect_used=double_active and double_factor > 1)
         if name == "鹿鹿时间到了":
             add_group_meta(today, gid, "change_extra_uses", 1 * double_factor)
             # 爱神 & 叮咚鸡状态：给所有群成员赋予对应效果
@@ -7807,11 +7935,13 @@ class WifePlugin(Star):
             cupid_msg = None
             if affected_targets:
                 cupid_msg = await self._handle_cupid_effect(today, uid, affected_targets, gid)
-                await self._handle_dingdong_effect(today, uid, affected_targets, gid)
+                dingdong_msg = await self._handle_dingdong_effect(today, uid, affected_targets, gid)
+                if dingdong_msg:
+                    cupid_msg = f"{cupid_msg}\n{dingdong_msg}" if cupid_msg else dingdong_msg
             msg = f"「鹿鹿时间到了」为本群所有人增加了{1 * double_factor}次「换老婆」机会！"
             if cupid_msg:
                 msg = f"{msg}\n{cupid_msg}"
-            return await finalize(True, msg)
+            return await finalize(True, msg, double_effect_used=double_active and double_factor > 1)
         if name == "发牌":
             members = {str(u) for u in cfg.keys()}
             members.add(uid)
@@ -7910,7 +8040,47 @@ class WifePlugin(Star):
                 msg += f"\n{item_fortune_msg}"
             if wife_fortune_msg:
                 msg += f"\n{wife_fortune_msg}"
-            return await finalize(True, msg)
+        if name == "空白卡":
+            return await finalize(False, "「空白卡」无任何效果，且不可使用。")
+        if name == "陷阱卡":
+            return await finalize(False, "「陷阱卡」不可主动使用。当自己因其他玩家的操作失去了这张卡时会自动反击。")
+        if name == "保配盲盒":
+            # 获得保配状态
+            set_user_flag(today, uid, "guaranteed_pool", True)
+            return await finalize(True, "你获得了「保配」状态！抽盲盒时不会抽到获得过的道具卡，且每次抽盲盒时抽到道具卡的数量固定为8。")
+        if name == "情敌":
+            if not target_uid:
+                return await finalize(False, "使用「情敌」时请@目标用户哦~")
+            target_uid = str(target_uid)
+            if target_uid == uid:
+                return await finalize(False, "不能对自己使用「情敌」哦~")
+                
+            # 众生平等判定
+            user_has_equal_rights = get_user_flag(today, uid, "equal_rights")
+            target_has_equal_rights = get_user_flag(today, target_uid, "equal_rights")
+            equal_rights_msg = ""
+            if not user_has_equal_rights and not target_has_equal_rights:
+                if get_user_flag(today, target_uid, "ban_items"):
+                    return await finalize(False, f"对方正处于贤者时间，无法对其使用「情敌」。")
+            else:
+                if get_user_flag(today, target_uid, "ban_items"):
+                    if user_has_equal_rights:
+                        equal_rights_msg = "众生平等！你无视了对方的贤者时间，"
+                    elif target_has_equal_rights:
+                        equal_rights_msg = "众生平等！对方的状态无法保护自己，"
+                        
+            # 自己与目标均获得情敌状态
+            set_user_flag(today, uid, "rival", True)
+            set_user_meta(today, uid, "rival_target", target_uid)
+            
+            set_user_flag(today, target_uid, "rival", True)
+            set_user_meta(today, target_uid, "rival_target", uid)
+            
+            target_info = cfg.get(target_uid, {})
+            target_nick = target_info.get("nick", f"用户{target_uid}") if isinstance(target_info, dict) else f"用户{target_uid}"
+            
+            return await finalize(True, f"{equal_rights_msg}你对 {target_nick} 使用了「情敌」卡！你与 {target_nick} 互为情敌，抽老婆时有概率将对方的老婆抢过来！")
+
         if name == "未来日记":
             # 设置下次抽老婆或换老婆的目标关键词
             set_user_meta(today, uid, "future_diary_target", "我妻由乃")
@@ -7926,26 +8096,47 @@ class WifePlugin(Star):
             lost_items_total = 0
             lost_wives_total = 0
             target_nicks = []
+            trap_messages = []
             
             for target_uid_str in interacting_users:
-                # 失去1-4张道具卡
-                num_to_lose = random.randint(1, 4)
+                # 失去10%~30%道具卡（至少1张）
                 target_items = item_data.get(today, {}).get(target_uid_str, [])
                 actual_lost = 0
+                lost_items = []
                 if target_items:
+                    pct = random.randint(10, 30) / 100.0
+                    num_to_lose = max(1, int(len(target_items) * pct))
                     actual_lost = min(len(target_items), num_to_lose)
                     for _ in range(actual_lost):
                         if target_items:
-                            target_items.pop(random.randrange(len(target_items)))
+                            lost_items.append(target_items.pop(random.randrange(len(target_items))))
                     lost_items_total += actual_lost
+                    
+                    # 触发陷阱卡检查
+                    trap_msg = self._check_and_trigger_trap(today, target_uid_str, uid, lost_items, gid)
+                    if trap_msg:
+                        trap_messages.append(trap_msg)
                 
-                # 失去1个老婆
+                # 失去1-3个老婆
                 target_wives = cfg.get(target_uid_str, {}).get("wives", [])
                 actual_wife_lost = 0
+                lost_wives_list = []
                 if target_wives:
-                    target_wives.pop(random.randrange(len(target_wives)))
-                    actual_wife_lost = 1
-                    lost_wives_total += 1
+                    num_wives_to_lose = random.randint(1, 3)
+                    actual_wife_lost = min(len(target_wives), num_wives_to_lose)
+                    for _ in range(actual_wife_lost):
+                        lost_wives_list.append(target_wives.pop(random.randrange(len(target_wives))))
+                    
+                    if len(target_wives) == 0:
+                        del cfg[target_uid_str]
+                    else:
+                        cfg[target_uid_str]["wives"] = target_wives
+                        if not get_user_flag(today, target_uid_str, "harem"):
+                            cfg[target_uid_str]["harem"] = False
+                            
+                    lost_wives_total += actual_wife_lost
+                    # 流失通知
+                    self._handle_wife_loss(today, target_uid_str, actual_wife_lost, gid, lost_wives_list=lost_wives_list)
                 
                 # 获取昵称
                 target_info = cfg.get(target_uid_str, {})
@@ -7955,30 +8146,46 @@ class WifePlugin(Star):
             save_item_data()
             save_group_config(cfg)
             
+            targets_str = "..".join(target_nicks) if len(target_nicks) > 1 else target_nicks[0]
+            # 为了跟上面兼容：
             targets_str = "、".join(target_nicks)
             result = f"报仇雪恨！你让 {targets_str} 随机失去了道具卡和老婆。共计失去 {lost_items_total} 张道具卡和 {lost_wives_total} 个老婆。"
+            if trap_messages:
+                result += "".join(trap_messages)
             return await finalize(True, result)
         if name == "神的不在场证明":
             set_user_flag(today, uid, "alibi", True)
             return await finalize(True, f"你获得了「神的不在场证明」状态！今日你对他人使用道具时，不会被记录为使用者。")
         if name == "发薪日":
-            # 本群所有成员（包括自己）各获得1次额外抽盲盒机会
-            total_count = 0
+            self_random = random.randint(0, 2)
+            
+            # 所有人（包括自己和他人）获得1次额外机会（均受二度寝影响）
+            others_count = 0
             for u in cfg.keys():
                 u_str = str(u)
-                add_user_mod(today, u_str, "blind_box_extra_draw", 1)
-                total_count += 1
+                add_user_mod(today, u_str, "blind_box_extra_draw", 1 * double_factor)
+                if u_str != uid:
+                    others_count += 1
             
+            # 自己额外获得随机 of 0~2次（受二度寝影响）
+            # 等一下，我之前的 ReplacementContent 里的注释是：
+            # # 自己额外获得随机的0~2次（受二度寝影响）
+            # 为了严谨：
+            if self_random > 0:
+                add_user_mod(today, uid, "blind_box_extra_draw", self_random * double_factor)
+                
             save_effects()
-            return await finalize(True, f"发薪日到啦！本群 {total_count} 位小伙伴（包括你）各获得了1次额外抽盲盒机会！")
+            self_total = (self_random + 1) * double_factor
+            others_total = 1 * double_factor
+            return await finalize(True, f"发薪日到啦！你获得了 {self_total} 次额外抽盲盒机会，本群其他 {others_count} 位小伙伴各获得了 {others_total} 次额外抽盲盒机会！", double_effect_used=double_active and double_factor > 1)
         if name == "博弈":
             if not target_uid:
                 return await finalize(False, "使用「博弈」时请@目标哦~")
             
             target_uid_str = str(target_uid)
             
-            # 自己随机 +/- 1~50%
-            my_bonus = random.randint(1, 50) / 100.0
+            # 自己随机 +/- 1~50%（受二度寝影响翻倍）
+            my_bonus = (random.randint(1, 50) / 100.0) * double_factor
             if get_user_flag(today, uid, "cheat"):
                 # 老千必定获得正向加成
                 pass
@@ -8000,7 +8207,7 @@ class WifePlugin(Star):
             target_type = "增加" if target_bonus > 0 else "减少"
             
             result = f"博弈开始！\n你的概率加成{my_type}了 {abs(int(my_bonus*100))}%；\n目标概率加成{target_type}了 {abs(int(target_bonus*100))}%。"
-            return await finalize(True, result)
+            return await finalize(True, result, double_effect_used=double_active and double_factor > 1)
         if name == "幕后交易":
             today_items = item_data.setdefault(today, {})
             user_items = today_items.get(uid, [])
@@ -8010,9 +8217,10 @@ class WifePlugin(Star):
             user_items.clear()
             save_item_data()
             
-            # 获得随机状态（星级受概率影响）
-            exclude_for_status = set(self.item_pool) - self.status_items
-            drawn = self._draw_item_by_quality(today, uid, count=lost_count, exclude_items=exclude_for_status, cfg=cfg, gid=gid)
+            # 获得随机状态（星级受概率影响，数量受二度寝翻倍）
+            drawn_count = lost_count * double_factor
+            exclude_for_status = (set(self.item_pool) - self.status_items) | self.items_need_target
+            drawn = self._draw_item_by_quality(today, uid, count=drawn_count, exclude_items=exclude_for_status, cfg=cfg, gid=gid)
             
             new_labels = []
             for state_item in drawn:
@@ -8021,7 +8229,7 @@ class WifePlugin(Star):
                 await self.apply_item_effect(state_item, event, None, caller_uid=uid, use_double_effect=False, consume_double_effect=False, skip_stacking_tower=True)
                 
             if new_labels:
-                return await finalize(True, f"幕后交易完成！你失去了 {lost_count} 张道具卡，获得了状态：{'、'.join(new_labels)}。")
+                return await finalize(True, f"幕后交易完成！你失去了 {lost_count} 张道具卡，获得了状态：{'、'.join(new_labels)}。", double_effect_used=double_active and double_factor > 1)
             else:
                 return await finalize(True, f"幕后交易完成！你失去了 {lost_count} 张道具卡，但很遗憾没有获得新状态。")
         if name == "多重人格":
@@ -8100,45 +8308,64 @@ class WifePlugin(Star):
                 
             return await finalize(True, f"你已翻开了 5 张牌子，正在等待选择...")
         if name == "过期盲盒":
-            add_user_mod(today, uid, "blind_box_extra_draw", 1)
-            msg = "你打开了过期盲盒，获得了1次额外抽盲盒机会。"
-            if random.random() < 0.5:
-                lose_type = random.choice(["wife", "item"])
+            add_user_mod(today, uid, "blind_box_extra_draw", 1 * double_factor)
+            msg = f"你打开了过期盲盒，获得了{1 * double_factor}次额外抽盲盒机会。"
+            if random.random() < 0.75:
+                # 确定惩罚类型：根据实际拥有的老婆和道具卡来决定，避免随机到空项
+                wives = cfg.get(uid, {}).get("wives", [])
+                today_items = item_data.setdefault(today, {})
+                user_items = today_items.get(uid, [])
+                
+                lose_type = None
+                if wives and user_items:
+                    lose_type = random.choice(["wife", "item"])
+                elif wives:
+                    lose_type = "wife"
+                elif user_items:
+                    lose_type = "item"
+                
                 if lose_type == "wife":
-                    wives = cfg.get(uid, {}).get("wives", [])
-                    if wives:
-                        lost_wife = wives.pop(random.randrange(len(wives)))
-                        save_group_config(cfg)
-                        self._handle_wife_loss(today, uid, 1, gid, lost_wives_list=[lost_wife])
-                        wife_name = self._get_wife_display_name(cfg, lost_wife['name'] if isinstance(lost_wife, dict) else lost_wife)
-                        msg += f"\n糟糕！过期盲盒有毒，你失去了老婆「{wife_name}」。"
-                else:
-                    today_items = item_data.setdefault(today, {})
-                    user_items = today_items.get(uid, [])
-                    if user_items:
-                        lost_item = user_items.pop(random.randrange(len(user_items)))
-                        save_item_data()
-                        msg += f"\n糟糕！过期盲盒爆炸了，你失去了道具卡「{lost_item}」。"
-            return await finalize(True, msg)
+                    num_to_lose = random.randint(1, min(3, len(wives)))
+                    lost_wives = []
+                    for _ in range(num_to_lose):
+                        lost_wives.append(wives.pop(random.randrange(len(wives))))
+                    save_group_config(cfg)
+                    self._handle_wife_loss(today, uid, num_to_lose, gid, lost_wives_list=lost_wives)
+                    wife_names = "、".join([self._get_wife_display_name(cfg, w['name'] if isinstance(w, dict) else w) for w in lost_wives])
+                    msg += f"\n糟糕！过期盲盒有毒，你失去了老婆：{wife_names}。"
+                elif lose_type == "item":
+                    pct = random.randint(10, 50) / 100.0
+                    lose_count = max(1, int(len(user_items) * pct))
+                    lose_count = min(lose_count, len(user_items))
+                    lost_items = []
+                    for _ in range(lose_count):
+                        lost_items.append(user_items.pop(random.randrange(len(user_items))))
+                    save_item_data()
+                    lost_items_text = "、".join(lost_items)
+                    msg += f"\n糟糕！过期盲盒爆炸了，你失去了道具卡：{lost_items_text}。"
+            return await finalize(True, msg, double_effect_used=double_active and double_factor > 1)
         if name == "安慰奖":
             choice = random.choice(["item", "status", "wife"])
             if choice == "item":
-                drawn = self._draw_item_by_quality(today, uid, count=1, cfg=cfg, gid=gid)
+                drawn = self._draw_item_by_quality(today, uid, count=1 * double_factor, cfg=cfg, gid=gid)
                 if drawn:
                     today_items = item_data.setdefault(today, {})
                     user_items = today_items.setdefault(uid, [])
                     user_items.extend(drawn)
                     save_item_data()
-                    return await finalize(True, f"安慰奖：你获得了1张道具卡「{drawn[0]}」！")
+                    items_text = "、".join(drawn)
+                    return await finalize(True, f"安慰奖：你获得了道具卡「{items_text}」！", double_effect_used=double_active and double_factor > 1)
             elif choice == "status":
-                exclude_for_status = set(self.item_pool) - self.status_items
-                drawn = self._draw_item_by_quality(today, uid, count=1, exclude_items=exclude_for_status, cfg=cfg, gid=gid)
+                exclude_for_status = (set(self.item_pool) - self.status_items) | self.items_need_target
+                drawn = self._draw_item_by_quality(today, uid, count=1 * double_factor, exclude_items=exclude_for_status, cfg=cfg, gid=gid)
                 if drawn:
-                    state = drawn[0]
-                    await self.apply_item_effect(state, event, None, caller_uid=uid, use_double_effect=False, consume_double_effect=False, skip_stacking_tower=True)
-                    spec = next((s for s in self.status_effect_specs if s.get("item_name") == state), {})
-                    label = spec.get("label", state)
-                    return await finalize(True, f"安慰奖：你获得了1个状态「{label}」！")
+                    new_labels = []
+                    for state in drawn:
+                        await self.apply_item_effect(state, event, None, caller_uid=uid, use_double_effect=False, consume_double_effect=False, skip_stacking_tower=True)
+                        spec = next((s for s in self.status_effect_specs if s.get("item_name") == state), {})
+                        new_labels.append(spec.get("label", state))
+                    states_text = "、".join(new_labels)
+                    return await finalize(True, f"安慰奖：你获得了状态「{states_text}」！", double_effect_used=double_active and double_factor > 1)
             
             # wife fallback
             img = self._choose_random_wife_image()
@@ -8177,8 +8404,11 @@ class WifePlugin(Star):
             set_user_meta(today, uid, "magic_circuit_triggers", 0)
             bonus_card = self._maybe_trigger_magic_circuit(today, uid)
             if bonus_card:
-                return await finalize(True, f"trace on——魔术回路启动！今天当你手中没有道具卡时会自动获得随机道具卡（最多10次）。魔术回路立即发动，你获得了「{bonus_card}」。")
-            return await finalize(True, f"trace on——你获得了「魔术回路」状态！今天当你手中没有道具卡时会自动获得随机道具卡（最多10次）。")
+                if bonus_card.endswith("[FAKE]"):
+                    return await finalize(True, f"trace on——魔术回路启动！今天当你手中没有道具卡时会自动获得随机道具卡（最多20次）。魔术回路立即发动，你获得了赝品...。")
+                else:
+                    return await finalize(True, f"trace on——魔术回路启动！今天当你手中没有道具卡时会自动获得随机道具卡（最多20次）。魔术回路立即发动，你获得了「{bonus_card}」。")
+            return await finalize(True, f"trace on——你获得了「魔术回路」状态！今天当你手中没有道具卡时会自动获得随机道具卡（最多20次）。")
         if name == "55开":
             # 设置众生平等状态
             set_user_flag(today, uid, "equal_rights", True)
@@ -8186,14 +8416,14 @@ class WifePlugin(Star):
         if name == "囤囤鼠":
             # 设置盲盒爱好者状态
             set_user_flag(today, uid, "blind_box_enthusiast", True)
-            return await finalize(True, f"你成为了盲盒爱好者！今日每4小时可以免费抽一次盲盒，但每10分钟只能使用一个道具。")
+            return await finalize(True, f"你成为了盲盒爱好者！今日每2小时可以免费抽一次盲盒，但每3分钟只能使用一个道具。")
         if name == "会员制餐厅":
             # 获得3次额外赠送指令次数，并获得"淳平"状态
             # 增加额外赠送次数（3次）
             add_user_mod(today, uid, "gift_extra_uses", 3 * double_factor)
             # 获得"淳平"状态
             set_user_flag(today, uid, "junpei", True)
-            return await finalize(True, f"你获得了{3 * double_factor}次额外赠送指令次数，并获得了「淳平」状态！")
+            return await finalize(True, f"你获得了{3 * double_factor}次额外赠送指令次数，并获得了「淳平」状态！", double_effect_used=double_active and double_factor > 1)
         if name == "柏青哥":
             # 随机触发一种效果
             choice = random.choice(["reset_and_gain", "pachinko_777", "three_states", "mute_300"])
@@ -8252,13 +8482,14 @@ class WifePlugin(Star):
                 return await finalize(
                     True,
                     f"666！你已用完今日所有次数并清空道具，并获得{change_gain}次换老婆、{ntr_gain}次牛老婆、{reset_gain}次重置、{reset_blind_box_gain}次重置盲盒机会。",
+                    double_effect_used=double_active and double_factor > 1
                 )
             elif choice == "pachinko_777":
                 # 获得"777"效果
                 set_user_flag(today, uid, "pachinko_777", True)
                 bonus_draws = 2 * double_factor
                 add_user_mod(today, uid, "blind_box_extra_draw", bonus_draws)
-                return await finalize(True, f"777！你获得{bonus_draws}次额外抽盲盒次数，且今日抽盲盒必定触发一次暴击。")
+                return await finalize(True, f"777！你获得{bonus_draws}次额外抽盲盒次数，且今日抽盲盒必定触发一次暴击。", double_effect_used=double_active and double_factor > 1)
             elif choice == "three_states":
                 eff = get_user_effects(today, uid)
                 state_pool = []
@@ -8308,22 +8539,25 @@ class WifePlugin(Star):
                 return await finalize(False, f"你当前没有道具卡，无法使用「洗牌」。")
             # 获取当前道具数量（包括"洗牌"本身）
             base_item_count = len(user_items)
-            # 检查是否有"老千"状态：如果有，获得双倍数量的道具卡
+            # 检查是否有"老千"状态
             has_cheat = get_user_flag(today, uid, "cheat")
-            item_count = base_item_count * 2 if has_cheat else base_item_count
+            # 50%~150%数量的道具卡，"老千"状态下为75%~175%
+            pct = random.randint(50, 150) / 100.0 if not has_cheat else random.randint(75, 175) / 100.0
+            item_count = max(1, round(base_item_count * pct))
             # 清空所有道具
             discarded_cards = list(user_items)
             if discarded_cards:
                 self._record_discarded_items(today, gid, discarded_cards)
             today_items[uid] = []
             save_item_data()
-            # 从道具池中随机抽取指定数量的道具
-            new_items = random.choices(self.item_pool, k=item_count)
+            # 从道具池中随机抽取指定数量的道具，降低获得"洗牌"的概率
+            weights = [0.1 if item == "洗牌" else 1.0 for item in self.item_pool]
+            new_items = random.choices(self.item_pool, weights=weights, k=item_count)
             today_items[uid] = new_items
             save_item_data()
             items_text = "、".join(new_items)
-            cheat_msg = "出老千！洗牌获得道具数量翻倍！" if has_cheat else ""
-            return await finalize(True, f"{cheat_msg}洗牌完成！你失去了所有道具卡，重新获得了{item_count}张道具卡：{items_text}。")
+            cheat_msg = "出老千！" if has_cheat else ""
+            return await finalize(True, f"{cheat_msg}洗牌完成！你失去了所有道具卡，重新获得了 {item_count} 张道具卡：{items_text}。")
         if name == "塞翁失马":
             set_user_flag(today, uid, "fortune_linked", True)
             return await finalize(True, f"塞翁失马焉知非福？")
@@ -8335,7 +8569,7 @@ class WifePlugin(Star):
             # 获得2次换老婆额外次数，并获得支配恶魔状态
             add_user_mod(today, uid, "change_extra_uses", 2 * double_factor)
             set_user_flag(today, uid, "dominate_demon", True)
-            return await finalize(True, f"你获得了「支配恶魔」状态！获得了{2 * double_factor}次换老婆额外次数，现在你可以在换老婆时@目标用户，让目标使用换老婆指令（消耗你的次数，且次数消耗翻倍）。")
+            return await finalize(True, f"你获得了「支配恶魔」状态！获得了{2 * double_factor}次换老婆额外次数，现在你可以在换老婆时@目标用户，让目标使用换老婆指令（消耗你的次数，且次数消耗翻倍）。", double_effect_used=double_active and double_factor > 1)
         if name == "奇迹于你":
             # 获得"奇迹于你"状态
             set_user_flag(today, uid, "omen_pioneer", True)
@@ -8532,11 +8766,11 @@ class WifePlugin(Star):
             set_user_flag(today, uid, "royal_bloodline", True)
             return await finalize(True, f"王室血脉在你身上流淌......你获得了「王之宝库」和「王室血统」！")
         if name == "出千":
-            # 50%概率获得"老千"状态，或者将所有道具提升一个品质
+            # 20%概率获得"老千"状态，或者将所有道具提升一个品质
             today_items = item_data.setdefault(today, {})
             user_items = today_items.get(uid, [])
             
-            if self._probability_check(0.5, today, uid, positive=True):
+            if self._probability_check(0.2, today, uid, positive=True):
                 # 获得"老千"状态（道具会被use_item中移除）
                 set_user_flag(today, uid, "cheat", True)
                 return await finalize(True, f"小手不太干净，抽盲盒或使用道具时，有一定概率获得一张随机道具卡。")
@@ -8625,6 +8859,141 @@ class WifePlugin(Star):
         if name == "都来看mygo":
             set_user_flag(today, uid, "go_fan", True, propagate=False)
             return await finalize(True, f"都来看MyGo!!!!! 你成为了go批，今天抽老婆或换老婆时，抽到BanG Dream的角色概率提升。")
+        if name == "献上忠诚":
+            if not target_uid:
+                return await finalize(False, f"使用「献上忠诚」时请@目标用户哦~")
+            target_uid = str(target_uid)
+            if target_uid == uid:
+                return await finalize(False, f"不能对自己使用「献上忠诚」哦~")
+            
+            # 众生平等判定
+            user_has_equal_rights = get_user_flag(today, uid, "equal_rights")
+            target_has_equal_rights = get_user_flag(today, target_uid, "equal_rights")
+            equal_rights_msg = ""
+            if not user_has_equal_rights and not target_has_equal_rights:
+                if get_user_flag(today, target_uid, "ban_items"):
+                    return await finalize(False, f"对方正处于贤者时间，无法对其使用「献上忠诚」。")
+            else:
+                if get_user_flag(today, target_uid, "ban_items"):
+                    if user_has_equal_rights:
+                        equal_rights_msg = "众生平等！你无视了对方的贤者时间，"
+                    elif target_has_equal_rights:
+                        equal_rights_msg = "众生平等！对方的状态无法保护自己，"
+            
+            today_items = item_data.setdefault(today, {})
+            target_items = list(today_items.get(target_uid, []))
+            if not target_items:
+                return await finalize(False, f"对方口袋里空空如也，没有道具卡可以被献上忠诚。")
+            
+            pct = random.randint(10, 50) / 100.0
+            lose_count = max(1, round(len(target_items) * pct * double_factor))
+            lose_count = min(lose_count, len(target_items))
+            
+            # 抽取抢走的卡
+            stolen_items = []
+            for _ in range(lose_count):
+                stolen_items.append(target_items.pop(random.randrange(len(target_items))))
+            today_items[target_uid] = target_items
+            save_item_data()
+            
+            # 损失通知
+            target_fortune_msg = self._handle_item_loss(today, target_uid, lose_count, gid)
+            
+            # 获取其他群友列表
+            others = [str(u) for u in cfg.keys() if str(u) != target_uid]
+            if not others:
+                others = [target_uid]
+                
+            member_counts = {}
+            for m in others:
+                member_counts[m] = len(today_items.get(m, []))
+                
+            distribution = {}
+            for item in stolen_items:
+                min_count = min(member_counts.values())
+                candidates = [m for m, count in member_counts.items() if count == min_count]
+                recipient = random.choice(candidates)
+                distribution.setdefault(recipient, []).append(item)
+                member_counts[recipient] += 1
+                
+            for r_uid, items in distribution.items():
+                today_items.setdefault(r_uid, []).extend(items)
+            save_item_data()
+            
+            # 拼接分配明细
+            dist_details = []
+            for r_uid, items in distribution.items():
+                r_info = cfg.get(r_uid, {})
+                r_nick = r_info.get("nick", f"用户{r_uid}") if isinstance(r_info, dict) else f"用户{r_uid}"
+                dist_details.append(f"{r_nick}（{len(items)}张）")
+            
+            dist_text = "、".join(dist_details)
+            target_info = cfg.get(target_uid, {})
+            target_nick = target_info.get("nick", f"用户{target_uid}") if isinstance(target_info, dict) else f"用户{target_uid}"
+            
+            trap_msg = self._check_and_trigger_trap(today, target_uid, uid, stolen_items, gid)
+            
+            msg = f"{equal_rights_msg}献上忠诚！{target_nick} 失去了 {lose_count} 张道具卡，并被随机分配给了：{dist_text}。"
+            if trap_msg:
+                msg += trap_msg
+            if target_fortune_msg:
+                msg += f"\n{target_nick}{target_fortune_msg.replace('祸福相依：', '的祸福相依：')}"
+                
+            return await finalize(True, msg, double_effect_used=double_active and double_factor > 1)
+
+        if name == "发狂":
+            if not target_uid:
+                return await finalize(False, f"使用「发狂」时请@目标用户哦~")
+            target_uid = str(target_uid)
+            if target_uid == uid:
+                return await finalize(False, f"不能对自己使用「发狂」哦~")
+                
+            # 过滤出单目标道具
+            single_target_items = [
+                item for item in self.items_need_target
+                if item not in {"月老", "发狂"}
+            ]
+            transformed_card = random.choice(single_target_items)
+            
+            # 触发变身卡效果
+            success, transformed_msg = await self.apply_item_effect(
+                transformed_card,
+                event,
+                target_uid,
+                extra_arg,
+                caller_uid=uid,
+                use_double_effect=use_double_effect,
+                consume_double_effect=consume_double_effect,
+                skip_stacking_tower=True
+            )
+            
+            if transformed_msg:
+                transformed_msg = f"发狂发动！变身为了「{transformed_card}」：\n{transformed_msg}"
+            return success, transformed_msg
+
+        if name == "广告牌":
+            # 过滤出无目标道具
+            no_target_items = [
+                item for item in self.item_pool
+                if item not in self.items_need_target and item != "广告牌"
+            ]
+            transformed_card = random.choice(no_target_items)
+            
+            # 触发变身卡效果
+            success, transformed_msg = await self.apply_item_effect(
+                transformed_card,
+                event,
+                None,
+                extra_arg,
+                caller_uid=uid,
+                use_double_effect=use_double_effect,
+                consume_double_effect=consume_double_effect,
+                skip_stacking_tower=True
+            )
+            
+            if transformed_msg:
+                transformed_msg = f"广告牌翻转！变身为了「{transformed_card}」：\n{transformed_msg}"
+            return success, transformed_msg
         # 其他未实现
         return await finalize(False, f"道具卡「{card_name}」的效果正在开发中，敬请期待~")
 
@@ -8890,6 +9259,46 @@ class WifePlugin(Star):
                 if "future_diary_target" in eff["meta"]:
                     del eff["meta"]["future_diary_target"]
                 save_effects()
+        # 检查情敌状态
+        rival_stolen = False
+        rival_stolen_wife_name = ""
+        rival_target_nick = ""
+        
+        if get_user_flag(today, uid, "rival"):
+            rival_target = get_user_meta(today, uid, "rival_target")
+            if rival_target:
+                rival_target_str = str(rival_target)
+                target_wives = list(get_wives_list(cfg, rival_target_str, today))
+                if target_wives:
+                    # 计算抢夺概率（受运势影响）
+                    rival_prob = self._calculate_probability(0.35, today, uid, gain_multiplier=1.0)
+                    rival_prob = min(0.9, rival_prob)
+                    
+                    if random.random() < rival_prob:
+                        stolen_img = random.choice(target_wives)
+                        target_wives.remove(stolen_img)
+                        
+                        # 在目标配置中移除该老婆
+                        if rival_target_str in cfg:
+                            if not target_wives:
+                                del cfg[rival_target_str]
+                            else:
+                                cfg[rival_target_str]["wives"] = target_wives
+                                if not get_user_flag(today, rival_target_str, "harem"):
+                                    cfg[rival_target_str]["harem"] = False
+                         
+                        # 将抽到的老婆设为被抢来的这个
+                        img = stolen_img
+                        rival_stolen = True
+                        rival_stolen_wife_name = self._get_wife_display_name(cfg, stolen_img)
+                        
+                        # 获取情敌昵称
+                        rival_target_info = cfg.get(rival_target_str, {})
+                        rival_target_nick = rival_target_info.get("nick", f"用户{rival_target_str}") if isinstance(rival_target_info, dict) else f"用户{rival_target_str}"
+                        
+                        # 记录流失通知
+                        self._handle_wife_loss(today, rival_target_str, 1, gid, lost_wives_list=[stolen_img])
+                        
         # 统一使用add_wife函数添加老婆
         add_wife(cfg, uid, img, today, nick, is_harem)
         save_group_config(cfg)
@@ -8906,6 +9315,11 @@ class WifePlugin(Star):
             text = f"你抽到了新老婆！当前共有{wife_count}个老婆。"
         else:
             text = ""
+            
+        if rival_stolen:
+            text = f"【情敌抢夺】情敌见面分外眼红！你直接从情敌 {rival_target_nick} 手中抢夺了他的老婆「{rival_stolen_wife_name}」！"
+            if is_harem:
+                text += f" 当前共有 {wife_count} 个老婆。"
         # 解析出处和角色名，分隔符为!
         if img.startswith("http"):
             display_name = self._resolve_avatar_nick(cfg, img)
@@ -9172,7 +9586,9 @@ class WifePlugin(Star):
             cupid_msg = await self._handle_cupid_effect(today, uid, tid, gid)
             if cupid_msg:
                 yield event.plain_result(cupid_msg)
-            await self._handle_dingdong_effect(today, uid, tid, gid)
+            dingdong_msg = await self._handle_dingdong_effect(today, uid, tid, gid)
+            if dingdong_msg:
+                yield event.plain_result(dingdong_msg)
             async for res in self._handle_light_fingers_on_ntr(today, uid, tid, event, cfg):
                 yield res
             self._grant_lightbulb_bonus(today, gid, "ntr")
@@ -10278,7 +10694,9 @@ class WifePlugin(Star):
             cupid_msg = await self._handle_cupid_effect(today, uid, target_uid, gid)
             if cupid_msg:
                 yield event.plain_result(cupid_msg)
-            await self._handle_dingdong_effect(today, uid, target_uid, gid)
+            dingdong_msg = await self._handle_dingdong_effect(today, uid, target_uid, gid)
+            if dingdong_msg:
+                yield event.plain_result(dingdong_msg)
         else:
             seduce_equal_rights_msg = seduce_equal_rights_prefix if 'seduce_equal_rights_prefix' in locals() else ""
             riddler_info = "\n".join(riddler_messages) if riddler_messages else ""
@@ -10879,7 +11297,10 @@ class WifePlugin(Star):
         if not get_user_flag(today, target_str, "sensitive_skin"):
             return ""
             
-        target_items = list(self.items_need_target)
+        target_items = [
+            item for item in self.items_need_target
+            if item not in {"月老", "发狂"}
+        ]
         if not target_items:
             return ""
             
@@ -10901,6 +11322,52 @@ class WifePlugin(Star):
         if c_msg:
             counter_msg += c_msg
         return counter_msg
+
+    def _rival_desc_generator(self, today: str, uid: str, gid: str) -> str:
+        target_uid = get_user_meta(today, uid, "rival_target")
+        if target_uid:
+            cfg = load_group_config(gid)
+            target_info = cfg.get(str(target_uid), {})
+            target_nick = target_info.get("nick", f"用户{target_uid}") if isinstance(target_info, dict) else f"用户{target_uid}"
+            return f"情敌：与 {target_nick} 互为情敌"
+        return "情敌：与他人互为情敌"
+
+    def _check_and_trigger_trap(self, today: str, victim_uid: str, attacker_uid: str, lost_items: list, gid: str) -> str:
+        """
+        检查失去的道具中是否包含陷阱卡，如果包含，则惩罚攻击者使其失去10%~50%的道具卡
+        """
+        if not lost_items or "陷阱卡" not in lost_items:
+            return ""
+        if not attacker_uid or str(attacker_uid) == str(victim_uid):
+            return ""
+            
+        attacker_str = str(attacker_uid)
+        today_items = item_data.setdefault(today, {})
+        attacker_items = today_items.get(attacker_str, [])
+        if not attacker_items:
+            return ""
+            
+        pct = random.randint(10, 50) / 100.0
+        lose_count = max(1, int(len(attacker_items) * pct))
+        lose_count = min(lose_count, len(attacker_items))
+        
+        stolen = []
+        for _ in range(lose_count):
+            stolen.append(attacker_items.pop(random.randrange(len(attacker_items))))
+        today_items[attacker_str] = attacker_items
+        save_item_data()
+        
+        # 记录流失通知
+        self._handle_item_loss(today, attacker_str, lose_count, gid)
+        
+        # 获取昵称
+        cfg = load_group_config(gid)
+        attacker_info = cfg.get(attacker_str, {})
+        attacker_nick = attacker_info.get("nick", f"用户{attacker_str}") if isinstance(attacker_info, dict) else f"用户{attacker_str}"
+        victim_info = cfg.get(str(victim_uid), {})
+        victim_nick = victim_info.get("nick", f"用户{victim_uid}") if isinstance(victim_info, dict) else f"用户{victim_uid}"
+        
+        return f"\n【陷阱卡触发】{victim_nick}失去的道具中包含「陷阱卡」！{attacker_nick}触发了陷阱，失去了 {lose_count} 张道具卡（{'、'.join(stolen)}）！"
     
     def _trigger_omen_event(self, today: str, uid: str, gid: str, omen_type: str, omen_message: str, omen_handler):
         """
