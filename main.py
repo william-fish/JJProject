@@ -1449,6 +1449,9 @@ def get_user_effects(today: str, uid: str) -> dict:
             "dingdong": False,  # 叮咚鸡
             "positive": False,  # 阳性
             "dominate_demon": False,  # 支配恶魔
+            "emergency_escape": False,  # 断尾
+            "shura_field": False,  # 修罗场
+            "scapegoat": False,  # 移花接木
             },
             "meta": {
                 "ntr_penalty_stack": 0,  # 苦主：失去老婆次数增量 -> 换老婆额外次数
@@ -1560,6 +1563,15 @@ def get_user_flag(today: str, uid: str, flag_key: str) -> bool:
             if now_ts >= expire_ts and eff["flags"].get("ban_items"):
                 eff["flags"]["ban_items"] = False
                 meta["ban_items_expire_ts"] = None
+                save_effects()
+    elif flag_key == "shura_field":
+        meta = eff.setdefault("meta", {})
+        expire_ts = meta.get("shura_field_expire_ts")
+        if expire_ts:
+            now_ts = datetime.utcnow().timestamp()
+            if now_ts >= expire_ts and eff["flags"].get("shura_field"):
+                eff["flags"]["shura_field"] = False
+                meta["shura_field_expire_ts"] = None
                 save_effects()
     return bool(eff["flags"].get(flag_key, False))
 
@@ -2142,8 +2154,13 @@ class WifePlugin(Star):
             "拖延症",
             "报仇",
             "神的不在场证明",
-            "发薪日",
+            "日加薪",
+            "仿生断尾",
             "博弈",
+            "美人计",
+            "修罗场",
+            "献祭",
+            "移花接木",
             "幕后交易",
             "多重人格",
             "敏感肌",
@@ -2251,8 +2268,13 @@ class WifePlugin(Star):
             "拖延症": 3,
             "报仇": 4,
             "神的不在场证明": 4,
-            "发薪日": 5,
+            "日加薪": 5,
+            "仿生断尾": 4,
             "博弈": 3,
+            "美人计": 4,
+            "修罗场": 4,
+            "献祭": 5,
+            "移花接木": 4,
             "献上忠诚": 5,
             "发狂": 3,
             "广告牌": 3,
@@ -2263,7 +2285,7 @@ class WifePlugin(Star):
             "翻牌子": 3,
             "精简卡组": 2,
         }
-        self.items_need_target = {"雌堕", "雄竞", "勾引", "牛道具", "偷拍", "复读", "好兄弟", "月老", "最后的波纹", "好人卡", "坏逼卡", "情敌", "催眠", "博弈", "献上忠诚", "发狂"}
+        self.items_need_target = {"雌堕", "雄竞", "勾引", "牛道具", "偷拍", "复读", "好兄弟", "月老", "最后的波纹", "好人卡", "坏逼卡", "情敌", "催眠", "博弈", "献上忠诚", "发狂", "美人计", "修罗场"}
         
         # 验证所有道具都有品质定义
         for item in self.item_pool:
@@ -2400,6 +2422,27 @@ class WifePlugin(Star):
                 "desc": "长一智：当别人对你使用道具卡时你会获得对方使用的那张道具卡",
                 "item_name": "吃一堑",
                 "checker": flag_checker("learned"),
+            },
+            {
+                "id": "emergency_escape",
+                "label": "断尾",
+                "desc": "断尾：当别人对你使用道具卡时，你将消耗道具卡来尝试抵御这次道具卡的效果。当你没有道具卡可消耗时，你失去该状态来抵御此次道具卡的效果。",
+                "item_name": "仿生断尾",
+                "checker": flag_checker("emergency_escape"),
+            },
+            {
+                "id": "shura_field",
+                "label": "修罗场",
+                "desc": "修罗场：你在3小时内每次试图使用任何道具卡时，有 40% 的概率被老婆们阻挠而使用失败（道具卡仍被消耗），流失1位老婆或成为纯爱战士可提前平息。",
+                "item_name": "修罗场",
+                "checker": flag_checker("shura_field"),
+            },
+            {
+                "id": "scapegoat",
+                "label": "移花接木",
+                "desc": "移花接木：当别人试图牛走你的老婆时，你会用「哥布林」代替被牛的老婆并保留原老婆，替身触发后状态失效。",
+                "item_name": "移花接木",
+                "checker": flag_checker("scapegoat"),
             },
             {
                 "id": "hand_scent",
@@ -3479,26 +3522,48 @@ class WifePlugin(Star):
         stolen = random.choice(wives)
         target_record = cfg.get(target_uid, {})
         target_nick = target_record.get("nick", f"用户{target_uid}") if isinstance(target_record, dict) else f"用户{target_uid}"
+        # 检查移花接木（替身效果）
+        scapegoat_triggered = False
+        if get_user_flag(today, target_uid, "scapegoat"):
+            eff = get_user_effects(today, target_uid)
+            meta = eff.setdefault("meta", {})
+            blocks = int(meta.get("scapegoat_blocks", 1) or 1) - 1
+            meta["scapegoat_blocks"] = blocks
+            if blocks <= 0:
+                set_user_flag(today, target_uid, "scapegoat", False)
+            save_effects()
+            stolen = "哥布林杀手!哥布林.png"
+            scapegoat_triggered = True
+
         display_name = self._format_wife_name(cfg, stolen)
-        if isinstance(target_record, dict):
-            target_wives = target_record.get("wives", [])
-            if stolen in target_wives:
-                target_wives.remove(stolen)
-            if target_record.get("harem"):
-                target_record["wives"] = target_wives
-                if not target_wives:
+        if not scapegoat_triggered:
+            if isinstance(target_record, dict):
+                target_wives = target_record.get("wives", [])
+                if stolen in target_wives:
+                    target_wives.remove(stolen)
+                if target_record.get("harem"):
+                    target_record["wives"] = target_wives
+                    if not target_wives:
+                        del cfg[target_uid]
+                    else:
+                        target_record["harem"] = len(target_wives) > 1
+                else:
                     del cfg[target_uid]
             else:
                 del cfg[target_uid]
+            save_group_config(cfg)
+            fortune_msg = self._handle_wife_loss(today, target_uid, 1, gid, lost_wives_list=[stolen])
         else:
-            del cfg[target_uid]
-        save_group_config(cfg)
-        fortune_msg = self._handle_wife_loss(today, target_uid, 1, gid, lost_wives_list=[stolen])
+            fortune_msg = None
+            
         is_harem = get_user_flag(today, uid, "harem")
         add_wife(cfg, uid, stolen, today, nick, is_harem, allow_shura=True)
         save_group_config(cfg)
         cancel_msg = await self.cancel_swap_on_wife_change(gid, [uid, target_uid])
-        messages = [f"左右开弓发动！随机对{target_nick}使用了一次牛老婆，成功抢走「{display_name}」。"]
+        if scapegoat_triggered:
+            messages = [f"左右开弓发动！随机对{target_nick}使用了一次牛老婆，但触发了对方的「移花接木」替身！你只牛走了一只【哥布林】！"]
+        else:
+            messages = [f"左右开弓发动！随机对{target_nick}使用了一次牛老婆，成功抢走「{display_name}」。"]
         if fortune_msg:
             messages.append(f"{target_nick}{fortune_msg.replace('祸福相依：', '的祸福相依：')}")
         if cancel_msg:
@@ -3628,7 +3693,6 @@ class WifePlugin(Star):
         extra_wife = int(get_user_mod(today, uid, "market_wife_extra_purchases", 0))
         if purchase_type == "wife" and extra_wife > 0:
             add_user_mod(today, uid, "market_wife_extra_purchases", -1)
-            return True
         return False
 
     def _handle_wife_loss(self, today: str, uid: str, loss_count: int = 1, gid: str = None, lost_wives_list: list[str] = None):
@@ -3637,6 +3701,15 @@ class WifePlugin(Star):
         - loss_count: 失去的老婆数量
         - lost_wives_list: 失去的老婆列表（可选，用于记录到lost_wives中）
         """
+        # 清除修罗场状态
+        shura_clear_msg = ""
+        if get_user_flag(today, uid, "shura_field"):
+            set_user_flag(today, uid, "shura_field", False)
+            t_eff = get_user_effects(today, uid)
+            t_eff.setdefault("meta", {})["shura_field_expire_ts"] = None
+            save_effects()
+            shura_clear_msg = "\n（你流失了老婆，后宫的修罗场争斗终于暂时平息了...）"
+
         loss = int(loss_count or 0)
         if loss <= 0:
             return None
@@ -3659,8 +3732,12 @@ class WifePlugin(Star):
                 reward_counts = Counter(rewards)
                 reward_list = [f"{name}×{count}" if count > 1 else name for name, count in reward_counts.items()]
                 fortune_msg = f"祸福相依：获得了{', '.join(reward_list)}"
+        final_msg = fortune_msg or ""
+        if shura_clear_msg:
+            final_msg = f"{final_msg}{shura_clear_msg}".strip()
+            
         if not get_user_flag(today, uid, "victim_auto_ntr"):
-            return fortune_msg
+            return final_msg if final_msg else None
         # 开后宫用户：换老婆次数转换为抽老婆次数
         is_harem = get_user_flag(today, uid, "harem")
         if is_harem and gid:
@@ -3671,7 +3748,7 @@ class WifePlugin(Star):
             add_user_mod(today, uid, "change_extra_uses", loss)
         penalty = int(get_user_meta(today, uid, "ntr_penalty_stack", 0) or 0)
         set_user_meta(today, uid, "ntr_penalty_stack", penalty + loss)
-        return fortune_msg
+        return final_msg if final_msg else None
 
     def _grant_fortune_bond_item_reward(self, today: str, uid: str, count: int):
         reward_count = int(count or 0)
@@ -3858,6 +3935,8 @@ class WifePlugin(Star):
 
     def _prepare_recognize_questions(self, count: int = 3) -> list[dict]:
         images = self._list_wife_images()
+        # 过滤掉包含"vtuber"（不区分大小写）的图片
+        images = [img for img in images if "vtuber" not in img.lower()]
         random.shuffle(images)
         questions = []
         for img in images:
@@ -4366,6 +4445,103 @@ class WifePlugin(Star):
         save_discarded_items()
         return collected
 
+    def _trigger_spy_copy(self, today: str, target_uid: str, gid: str, card_obtained: str) -> str | None:
+        """
+        美人计：当被寄宿间谍的目标用户使用道具卡时，间谍主人有 30% 概率复制一张相同的道具卡
+        """
+        t_eff = get_user_effects(today, target_uid)
+        t_spies = t_eff.get("meta", {}).get("spies", [])
+        if not t_spies:
+            return None
+        copied_msgs = []
+        for spy in list(t_spies):
+            from_uid = spy["from_uid"]
+            cfg = load_group_config(gid)
+            target_wives = get_wives_list(cfg, target_uid, today)
+            if spy["wife"] not in target_wives:
+                t_spies.remove(spy)
+                save_effects()
+                continue
+            prob = self._calculate_probability(0.30, today, from_uid, positive=True, gid=gid)
+            if random.random() < prob:
+                owner_items = item_data.setdefault(today, {}).setdefault(from_uid, [])
+                owner_items.append(card_obtained)
+                save_item_data()
+                owner_record = cfg.get(from_uid, {})
+                owner_nick = owner_record.get("nick", f"用户{from_uid}") if isinstance(owner_record, dict) else f"用户{from_uid}"
+                copied_msgs.append(f"「美人计」生效！寄宿在对方身边的间谍老婆暗中复制了「{card_obtained}」传送给原主人 {owner_nick}！")
+        return "\n".join(copied_msgs) if copied_msgs else None
+
+    def _trigger_spy_draw_copy(self, today: str, target_uid: str, gid: str, drawn_items: list[str]) -> str | None:
+        """
+        美人计：当被寄宿间谍的目标用户抽盲盒时，间谍主人有 30% 概率复制其中一张相同的道具卡
+        """
+        if not drawn_items:
+            return None
+        t_eff = get_user_effects(today, target_uid)
+        t_spies = t_eff.get("meta", {}).get("spies", [])
+        if not t_spies:
+            return None
+        copied_msgs = []
+        for spy in list(t_spies):
+            from_uid = spy["from_uid"]
+            cfg = load_group_config(gid)
+            target_wives = get_wives_list(cfg, target_uid, today)
+            if spy["wife"] not in target_wives:
+                t_spies.remove(spy)
+                save_effects()
+                continue
+            prob = self._calculate_probability(0.30, today, from_uid, positive=True, gid=gid)
+            if random.random() < prob:
+                copied_card = random.choice(drawn_items)
+                owner_items = item_data.setdefault(today, {}).setdefault(from_uid, [])
+                owner_items.append(copied_card)
+                save_item_data()
+                owner_record = cfg.get(from_uid, {})
+                owner_nick = owner_record.get("nick", f"用户{from_uid}") if isinstance(owner_record, dict) else f"用户{from_uid}"
+                copied_msgs.append(f"「美人计」生效！寄宿在对方身边的间谍老婆暗中复制了抽到的「{copied_card}」传送给原主人 {owner_nick}！")
+        return "\n".join(copied_msgs) if copied_msgs else None
+
+    def _check_and_trigger_spy_eviction(self, today: str, uid: str, gid: str, evicted_wives: list[str]) -> str | None:
+        """
+        美人计：目标玩家通过“打老婆”或“离婚”驱识别驱逐间谍老婆时，老婆回到主人身边，并顺手偷走目标一张道具卡
+        """
+        if not evicted_wives:
+            return None
+        t_eff = get_user_effects(today, uid)
+        t_spies = t_eff.get("meta", {}).get("spies", [])
+        if not t_spies:
+            return None
+        evicted_messages = []
+        for spy in list(t_spies):
+            if spy["wife"] in evicted_wives:
+                from_uid = spy["from_uid"]
+                cfg = load_group_config(gid)
+                from_record = cfg.get(from_uid, {})
+                from_nick = from_record.get("nick", f"用户{from_uid}") if isinstance(from_record, dict) else f"用户{from_uid}"
+                add_wife(cfg, from_uid, spy["wife"], today, from_nick, is_harem=get_user_flag(today, from_uid, "harem"), allow_shura=True)
+                save_group_config(cfg)
+                
+                # 顺手偷走 1 张道具卡
+                stolen_card = None
+                uid_items = item_data.setdefault(today, {}).setdefault(uid, [])
+                if uid_items:
+                    stolen_card = random.choice(uid_items)
+                    uid_items.remove(stolen_card)
+                    from_items = item_data.setdefault(today, {}).setdefault(from_uid, [])
+                    from_items.append(stolen_card)
+                    save_item_data()
+                
+                t_spies.remove(spy)
+                save_effects()
+                
+                display_name = self._get_wife_display_name(cfg, spy["wife"])
+                if stolen_card:
+                    evicted_messages.append(f"间谍老婆「{display_name}」被驱逐！她回到了原主人 {from_nick} 身边，并顺手偷走了你的一张道具卡「{stolen_card}」！")
+                else:
+                    evicted_messages.append(f"间谍老婆「{display_name}」被驱逐！她回到了原主人 {from_nick} 身边。")
+        return "\n".join(evicted_messages) if evicted_messages else None
+
     def _maybe_trigger_magic_circuit(self, today: str, uid: str):
         """
         魔术回路效果：当用户今天没有道具卡时，立即发放一张随机道具卡（每日最多20次）
@@ -4752,6 +4928,7 @@ class WifePlugin(Star):
             yield event.plain_result(f"{event.get_sender_name()}，{prompt}\n（图片「{question['image']}」暂不可用，请联系管理员）")
         session["awaiting_answer"] = True
         session["no_at_count"] = 0
+        session["hint_given"] = False
         self._schedule_recognize_timeout(event, session_key, idx, question)
 
     async def _check_recognize_timeout(self, event: AstrMessageEvent, session_key: tuple[str, str], question_index: int, question: dict):
@@ -4781,6 +4958,20 @@ class WifePlugin(Star):
         answer_text = self._extract_plain_text(event)
         if not answer_text:
             yield event.plain_result("请@我并直接回复角色名字哦~")
+            return
+        if answer_text.strip() == "提示":
+            if session.get("hint_given"):
+                yield event.plain_result("这一题已经给你过提示啦，快抓紧时间回答吧！")
+                return
+            session["hint_given"] = True
+            question = questions[idx]
+            source_name = question.get("source_name", "").strip()
+            if source_name:
+                yield event.plain_result(f"提示：这位老婆是来自《{source_name}》的哦~")
+            else:
+                yield event.plain_result("提示：这位老婆没有记录作品信息呢~")
+            # 重新规划超时时间，使得用户有额外时间作答
+            self._schedule_recognize_timeout(event, session_key, idx, question)
             return
         question = questions[idx]
         session["awaiting_answer"] = False
@@ -5079,10 +5270,16 @@ class WifePlugin(Star):
                 if not current_available:
                     set_user_flag(today, uid, "guaranteed_pool", False)
                     has_guaranteed = False
+                    eff = get_user_effects(today, uid)
+                    meta = eff.setdefault("meta", {})
+                    meta["guaranteed_count"] = 8
+                    save_effects()
             
             # 本批次决定抽取的道具数量（应用永久加成）
             if has_guaranteed:
-                batch_count = 8
+                eff = get_user_effects(today, uid)
+                meta = eff.setdefault("meta", {})
+                batch_count = int(meta.get("guaranteed_count", 8) or 8)
             else:
                 base_empty_prob = 0.2 - empty_reduction_bonus  # 空抽概率，最低为0
                 base_empty_prob = max(0.0, min(1.0, base_empty_prob))
@@ -5249,6 +5446,11 @@ class WifePlugin(Star):
                 result_parts.append(f"你抽到了：{items_text}，记得善加利用哦~")
         if cheat_bonus:
             result_parts.append(f"出千！你额外获得了一张随机道具卡「{cheat_bonus}」。")
+        
+        # 美人计：间谍复制抽到的道具卡
+        spy_msg = self._trigger_spy_draw_copy(today, uid, gid, drawn_items)
+        if spy_msg:
+            result_parts.append(spy_msg)
         
         yield event.plain_result("\n".join(result_parts))
 
@@ -6353,6 +6555,16 @@ class WifePlugin(Star):
         if card_name not in user_items:
             yield event.plain_result(f"{event.get_sender_name()}，你今天的道具卡里没有「{card_name}」哦~")
             return
+            
+        # 修罗场状态：每次试图使用任何道具卡时，有 40% 的概率被老婆们阻挠而使用失败（并消耗卡）
+        if get_user_flag(today, uid, "shura_field"):
+            shura_prob = self._calculate_probability(0.40, today, uid, positive=False, gid=gid)
+            if random.random() < shura_prob:
+                user_items.remove(card_name)
+                save_item_data()
+                yield event.plain_result(f"{event.get_sender_name()}，你后宫的「修罗场」爆发了！老婆们因为吃醋扭打在一起，拼死阻挠并扯碎了你想使用的道具卡「{card_name}」！（使用失败，道具卡已消耗）")
+                return
+                
         with data_manager.transaction("item_data", "effects_data", "wives_data"):
             success, message = await self.apply_item_effect(
                 card_name, event, target_uid, extra_arg, skip_stacking_tower=False
@@ -6527,11 +6739,23 @@ class WifePlugin(Star):
                 double_factor = double_factor + (maximize_factor - 1)
                 # 向下取整，避免出现1.5次机会等不合理情况
                 double_factor = int(double_factor)
+        
+        # 献祭倍数
+        sacrifice_mult = get_user_meta(today, uid, "sacrificed_multiplier", 1)
+        if sacrifice_mult > 1:
+            double_factor = double_factor * sacrifice_mult
+            set_user_meta(today, uid, "sacrificed_multiplier", 1)
 
         # 跟踪是否实际应用了翻倍效果（用于决定是否消耗二度寝状态）
         double_effect_applied = False
+        failed_block_msg = None
 
         async def finalize(success_flag: bool, message: str | None, *, double_effect_used: bool = False):
+            nonlocal failed_block_msg, sacrifice_mult
+            if success_flag and failed_block_msg and message:
+                message = f"{failed_block_msg}\n{message}"
+            if success_flag and sacrifice_mult > 1 and message:
+                message = f"【献祭加倍】由于你之前献祭了老婆，本次道具效果已翻了 {sacrifice_mult} 倍！\n{message}"
             # 只有在实际应用了翻倍效果时才消耗二度寝状态
             if (
                 consume_double_effect
@@ -6705,6 +6929,107 @@ class WifePlugin(Star):
             # 注意：所有需要显示风险骰子前缀的地方都应该在获取结果后立即使用，这里只是清理残留
             _ = self._get_risk_dice_result(today, uid)
             return success_flag, message
+
+        # 检查「断尾」状态（被攻击方抵御道具效果）
+        target_uids = []
+        if target_uid is not None:
+            target_uids.append(str(target_uid))
+        if name == "月老":
+            if forced_targets:
+                target_uids.extend([str(t) for t in forced_targets])
+            else:
+                riddler_messages = []
+                targets = self.parse_multi_targets(event, limit=2, riddler_messages=riddler_messages)
+                target_uids.extend([str(t) for t in targets])
+        
+        # 去重并排除使用者本人
+        target_uids = list(set(target_uids))
+        if uid in target_uids:
+            target_uids.remove(uid)
+            
+        blocked_target = None
+        for t_uid in target_uids:
+            if get_user_flag(today, t_uid, "emergency_escape") and not get_user_flag(today, t_uid, "ban_items"):
+                blocked_target = t_uid
+                break
+                
+        if blocked_target:
+            # 75% 抵御成功率，受概率加成影响
+            block_prob = self._calculate_probability(0.75, today, blocked_target, positive=True, gid=gid)
+            if random.random() < block_prob:
+                t_eff = get_user_effects(today, blocked_target)
+                t_meta = t_eff.setdefault("meta", {})
+                blocks = t_meta.get("emergency_escape_blocks", 0)
+                
+                t_items = item_data.setdefault(today, {}).setdefault(blocked_target, [])
+                N = len(t_items)
+                
+                # 抵御成功后，有 25% 概率不消耗道具卡，受概率加成影响
+                free_prob = self._calculate_probability(0.25, today, blocked_target, positive=True, gid=gid)
+                consume_cards = random.random() >= free_prob
+                
+                t_record = cfg.get(blocked_target, {})
+                t_nick = t_record.get("nick", f"用户{blocked_target}") if isinstance(t_record, dict) else f"用户{blocked_target}"
+                
+                if not consume_cards:
+                    # 触发不消耗道具卡/状态
+                    t_meta["emergency_escape_blocks"] = blocks + 1
+                    save_effects()
+                    msg = f"由于 {t_nick} 具有「断尾」能力，使用「{name}」的效果被抵御了！壁虎断尾奇迹发生，本次断尾竟未掉落任何道具卡！"
+                    return await finalize(True, msg)
+                
+                # 如果没有卡可以扣，或者抵御次数已经达到 5 次（第 6 次抵御直接破盾）
+                if N <= 0 or blocks >= 5:
+                    set_user_flag(today, blocked_target, "emergency_escape", False)
+                    t_meta["emergency_escape_blocks"] = 0
+                    save_effects()
+                    msg = f"由于 {t_nick} 触发「断尾」求生，使用「{name}」的效果被抵御了！对方已无余卡可以舍弃，彻底断去「尾巴」（失去「断尾」状态）。"
+                    return await finalize(True, msg)
+                else:
+                    # 按照受击次数非线性指数流失比例：
+                    # 第一次：固定 1 张
+                    # 第二次：10%
+                    # 第三次：35%
+                    # 第四次：70%
+                    # 第五次：100%
+                    if blocks == 0:
+                        X = 1
+                    elif blocks == 1:
+                        X = max(1, math.ceil(N * 0.10))
+                    elif blocks == 2:
+                        X = max(1, math.ceil(N * 0.35))
+                    elif blocks == 3:
+                        X = max(1, math.ceil(N * 0.70))
+                    else:
+                        X = N
+                    
+                    X = min(X, N)
+                    lost_cards = []
+                    for _ in range(X):
+                        if t_items:
+                            chosen_card = random.choice(t_items)
+                            t_items.remove(chosen_card)
+                            lost_cards.append(chosen_card)
+                    save_item_data()
+                    
+                    # 触发被动效果（如：祸福相依、魔术回路）
+                    fortune_msg = self._handle_item_loss(today, blocked_target, X, gid)
+                    
+                    # 记录抵御次数
+                    t_meta["emergency_escape_blocks"] = blocks + 1
+                    save_effects()
+                    
+                    lost_str = "、".join([f"「{c}」" for c in lost_cards])
+                    msg = f"由于 {t_nick} 触发「断尾」求生，使用「{name}」的效果被抵御了！对方果断舍弃了 {X} 张道具卡（{lost_str}）作为断尾代价！"
+                    if fortune_msg:
+                        msg += f"\n{fortune_msg}"
+                    return await finalize(True, msg)
+            else:
+                # 抵御失败
+                t_record = cfg.get(blocked_target, {})
+                t_nick = t_record.get("nick", f"用户{blocked_target}") if isinstance(t_record, dict) else f"用户{blocked_target}"
+                failed_block_msg = f"（{t_nick} 企图「断尾」求生但失败了！）"
+
         # 长一智被动效果：如果本次道具有明确目标，且目标拥有长一智，则目标在生效后获得同名道具卡
         learned_target_uid = None
         if target_uid is not None:
@@ -6795,8 +7120,21 @@ class WifePlugin(Star):
             return await finalize(success, message)
         # ⑤ 纯爱战士：今日不可被牛走，且无法使用换老婆
         if name == "纯爱战士":
-            set_user_flag(today, uid, "protect_from_ntr", True)
-            return await finalize(True, f"你成为了纯爱战士！")
+            t_uid = target_uid_str if target_uid else uid
+            set_user_flag(today, t_uid, "protect_from_ntr", True)
+            
+            # 清除修罗场状态
+            shura_msg = ""
+            if get_user_flag(today, t_uid, "shura_field"):
+                set_user_flag(today, t_uid, "shura_field", False)
+                t_eff = get_user_effects(today, t_uid)
+                t_eff.setdefault("meta", {})["shura_field_expire_ts"] = None
+                save_effects()
+                shura_msg = "，并净化了后宫的「修罗场」状态"
+            
+            t_record = cfg.get(t_uid, {})
+            t_nick = t_record.get("nick", f"用户{t_uid}") if isinstance(t_record, dict) else f"用户{t_uid}"
+            return await finalize(True, f"{t_nick}成为了纯爱战士{shura_msg}！")
         if name == "雄竞":
             if not target_uid:
                 return False, "使用“雄竞”时请@目标用户哦~"
@@ -8060,7 +8398,15 @@ class WifePlugin(Star):
         if name == "保配盲盒":
             # 获得保配状态
             set_user_flag(today, uid, "guaranteed_pool", True)
-            return await finalize(True, "你获得了「保配」状态！抽盲盒时不会抽到获得过的道具卡，且每次抽盲盒时抽到道具卡的数量固定为8。")
+            eff = get_user_effects(today, uid)
+            meta = eff.setdefault("meta", {})
+            guaranteed_cnt = 8 * double_factor
+            meta["guaranteed_count"] = guaranteed_cnt
+            save_effects()
+            if double_factor > 1:
+                return await finalize(True, f"你获得了「保配」状态！由于翻倍效果，每次抽盲盒时抽到道具卡的数量固定为 {guaranteed_cnt}！", double_effect_used=True)
+            else:
+                return await finalize(True, "你获得了「保配」状态！抽盲盒时不会抽到获得过的道具卡，且每次抽盲盒时抽到道具卡的数量固定为8。")
         if name == "情敌":
             if not target_uid:
                 return await finalize(False, "使用「情敌」时请@目标用户哦~")
@@ -8169,7 +8515,129 @@ class WifePlugin(Star):
         if name == "神的不在场证明":
             set_user_flag(today, uid, "alibi", True)
             return await finalize(True, f"你获得了「神的不在场证明」状态！今日你对他人使用道具时，不会被记录为使用者。")
-        if name == "发薪日":
+        if name == "仿生断尾":
+            set_user_flag(today, uid, "emergency_escape", True)
+            eff = get_user_effects(today, uid)
+            meta = eff.setdefault("meta", {})
+            meta["emergency_escape_blocks"] = 0
+            save_effects()
+            return await finalize(True, f"你获得了「断尾」状态！犹如壁虎断尾，当别人对你使用道具卡时，你将消耗道具卡来尝试抵御效果。")
+
+        if name == "移花接木":
+            set_user_flag(today, uid, "scapegoat", True)
+            eff = get_user_effects(today, uid)
+            meta = eff.setdefault("meta", {})
+            meta["scapegoat_blocks"] = double_factor
+            save_effects()
+            if double_factor > 1:
+                return await finalize(True, f"你获得了「移花接木」状态！由于翻倍效果，已在你名下的老婆身上绑定了 {double_factor} 个「替身木偶」，可抵御 {double_factor} 次抢夺！", double_effect_used=True)
+            else:
+                return await finalize(True, f"你获得了「移花接木」状态！已在你名下的老婆身上绑定了「替身木偶」，当别人试图牛你老婆时会用「哥布林」代替并保留原老婆！")
+
+        if name == "美人计":
+            if not target_uid:
+                return False, "使用“美人计”时请@目标用户哦~"
+            target_uid_str = str(target_uid)
+            if target_uid_str == uid:
+                return False, "不能对自己使用“美人计”哦~"
+            if get_user_flag(today, target_uid_str, "ban_items"):
+                return False, "对方处于贤者/禁言时间，无法使用“美人计”。"
+                
+            user_wives = list(get_wives_list(cfg, uid, today))
+            if not user_wives:
+                return False, "你今天还没有老婆，无法使用「美人计」哦~"
+                
+            # 随机选择一个老婆作为间谍
+            spy_wife = random.choice(user_wives)
+            user_wives.remove(spy_wife)
+            
+            # 从原主人移除该老婆
+            if uid in cfg:
+                if not user_wives:
+                    del cfg[uid]
+                else:
+                    cfg[uid]["wives"] = user_wives
+                    if not get_user_flag(today, uid, "harem"):
+                        cfg[uid]["harem"] = False
+            
+            # 送给目标
+            target_record = cfg.get(target_uid_str, {})
+            target_nick = target_record.get("nick", f"用户{target_uid_str}") if isinstance(target_record, dict) else f"用户{target_uid_str}"
+            
+            # 使用add_wife
+            add_wife(cfg, target_uid_str, spy_wife, today, target_nick, is_harem=get_user_flag(today, target_uid_str, "harem"), allow_shura=True)
+            save_group_config(cfg)
+            
+            # 登记间谍到目标的 metadata
+            t_eff = get_user_effects(today, target_uid_str)
+            t_meta = t_eff.setdefault("meta", {})
+            t_spies = t_meta.setdefault("spies", [])
+            t_spies.append({"wife": spy_wife, "from_uid": uid})
+            save_effects()
+            
+            display_name = self._get_wife_display_name(cfg, spy_wife)
+            result = f"美人计成功！你派出了老婆「{display_name}」前去卧底，她现在已经加入了 {target_nick} 的后宫中！"
+            return await finalize(True, result)
+
+        if name == "修罗场":
+            if not target_uid:
+                return False, "使用“修罗场”时请@目标用户哦~"
+            target_uid_str = str(target_uid)
+            if get_user_flag(today, target_uid_str, "ban_items"):
+                return False, "对方处于贤者/禁言时间，无法使用“修罗场”。"
+                
+            # 给目标设置修罗场标记和过期时间
+            set_user_flag(today, target_uid_str, "shura_field", True)
+            t_eff = get_user_effects(today, target_uid_str)
+            t_meta = t_eff.setdefault("meta", {})
+            duration = 10800 * double_factor
+            t_meta["shura_field_expire_ts"] = datetime.utcnow().timestamp() + duration
+            save_effects()
+            
+            target_record = cfg.get(target_uid_str, {})
+            target_nick = target_record.get("nick", f"用户{target_uid_str}") if isinstance(target_record, dict) else f"用户{target_uid_str}"
+            hours = int(duration // 3600)
+            result = f"你对 {target_nick} 使用了「修罗场」！对方后宫瞬间燃起熊熊烈火，在接下来 {hours} 小时内，每次试图使用道具卡都有 40% 概率被老婆们强行阻挠并扯碎！"
+            return await finalize(True, result, double_effect_used=double_factor > 1)
+
+        if name == "献祭":
+            user_wives = list(get_wives_list(cfg, uid, today))
+            if not user_wives:
+                return False, "你今天还没有老婆，无法使用「献祭」哦~"
+                
+            # 随机百分比 10% ~ 100%
+            pct = random.randint(10, 100) / 100.0
+            sacrifice_count = max(1, int(len(user_wives) * pct))
+            sacrificed_wives = random.sample(user_wives, sacrifice_count)
+            
+            # 从用户删除选中的老婆
+            for w in sacrificed_wives:
+                user_wives.remove(w)
+            if uid in cfg:
+                if not user_wives:
+                    del cfg[uid]
+                else:
+                    cfg[uid]["wives"] = user_wives
+                    if not get_user_flag(today, uid, "harem"):
+                        cfg[uid]["harem"] = False
+            save_group_config(cfg)
+            
+            # 处理失去老婆的逻辑
+            fortune_msg = self._handle_wife_loss(today, uid, sacrifice_count, gid, lost_wives_list=sacrificed_wives)
+            await self.cancel_swap_on_wife_change(gid, [uid])
+            
+            # 计算翻倍倍率：基础2倍，每献祭3个多加1倍
+            factor = 2 + (sacrifice_count // 3)
+            
+            # 存储翻倍倍率
+            set_user_meta(today, uid, "sacrificed_multiplier", factor)
+            
+            wife_names = "、".join([self._get_wife_display_name(cfg, w) for w in sacrificed_wives])
+            result = f"你忍痛献祭了 {sacrifice_count} 个老婆（{wife_names}）！血色仪式成功，你的下一次道具效果将翻 {factor} 倍！"
+            if fortune_msg:
+                result += f"\n{fortune_msg}"
+            return await finalize(True, result)
+        if name == "日加薪":
             self_random = random.randint(0, 2)
             
             # 所有人（包括自己和他人）获得1次额外机会（均受二度寝影响）
@@ -8181,16 +8649,13 @@ class WifePlugin(Star):
                     others_count += 1
             
             # 自己额外获得随机 of 0~2次（受二度寝影响）
-            # 等一下，我之前的 ReplacementContent 里的注释是：
-            # # 自己额外获得随机的0~2次（受二度寝影响）
-            # 为了严谨：
             if self_random > 0:
                 add_user_mod(today, uid, "blind_box_extra_draw", self_random * double_factor)
                 
             save_effects()
             self_total = (self_random + 1) * double_factor
             others_total = 1 * double_factor
-            return await finalize(True, f"发薪日到啦！你获得了 {self_total} 次额外抽盲盒机会，本群其他 {others_count} 位小伙伴各获得了 {others_total} 次额外抽盲盒机会！", double_effect_used=double_active and double_factor > 1)
+            return await finalize(True, f"日加薪到啦！你与本群其他 {others_count} 位小伙伴均获得了 {others_total} 次额外抽盲盒机会！", double_effect_used=double_active and double_factor > 1)
         if name == "博弈":
             if not target_uid:
                 return await finalize(False, "使用「博弈」时请@目标哦~")
@@ -8656,8 +9121,12 @@ class WifePlugin(Star):
             if uid in cfg:
                 del cfg[uid]
                 save_group_config(cfg)
+            # 驱逐间谍老婆
+            spy_msg = self._check_and_trigger_spy_eviction(today, uid, gid, lost_wives_list)
             fortune_msg = self._handle_wife_loss(today, uid, wife_count, gid, lost_wives_list=lost_wives_list)
             msg = f"离婚！你失去了所有老婆（共{wife_count}个）。"
+            if spy_msg:
+                msg = f"{msg}\n{spy_msg}"
             
             # 分财产：失去一半道具（如果用户是纯爱战士则不会失去道具，和平分手）
             is_pure_love = get_user_flag(today, uid, "protect_from_ntr")
@@ -8684,29 +9153,33 @@ class WifePlugin(Star):
                 msg += f"\n{fortune_msg}"
             return await finalize(True, msg)
         if name == "高利贷":
-            # 获得2张随机道具卡
-            drawn_items = self._draw_item_by_quality(today, uid, 2, cfg=cfg, gid=gid)
+            # 获得2 * double_factor张随机道具卡
+            draw_cnt = 2 * double_factor
+            loan_cnt = 4 * double_factor
+            drawn_items = self._draw_item_by_quality(today, uid, draw_cnt, cfg=cfg, gid=gid)
             if drawn_items:
                 today_items = item_data.setdefault(today, {})
                 user_items = today_items.setdefault(uid, [])
                 user_items.extend(drawn_items)
                 save_item_data()
                 items_text = "、".join(drawn_items)
-                # 设置半小时后失去4张道具卡
+                # 设置半小时后失去道具卡
                 eff = get_user_effects(today, uid)
                 meta = eff.setdefault("meta", {})
                 meta["loan_expire_ts"] = datetime.utcnow().timestamp() + 1800  # 半小时 = 1800秒
-                meta["loan_item_count"] = 4
+                meta["loan_item_count"] = loan_cnt
                 save_effects()
-                return await finalize(True, f"高利贷生效！你获得了2张随机道具卡：{items_text}。但半小时后你将失去4张随机道具卡。")
+                msg = f"高利贷生效！你获得了{draw_cnt}张随机道具卡：{items_text}。但半小时后你将失去{loan_cnt}张随机道具卡。"
+                return await finalize(True, msg, double_effect_used=double_factor > 1)
             else:
                 # 即使没抽到道具，也要设置定时失去
                 eff = get_user_effects(today, uid)
                 meta = eff.setdefault("meta", {})
                 meta["loan_expire_ts"] = datetime.utcnow().timestamp() + 1800
-                meta["loan_item_count"] = 4
+                meta["loan_item_count"] = loan_cnt
                 save_effects()
-                return await finalize(True, f"高利贷生效！但你没有抽到任何道具卡。半小时后你将失去4张随机道具卡（如果你有的话）。")
+                msg = f"高利贷生效！但你没有抽到任何道具卡。半小时后你将失去{loan_cnt}张随机道具卡（如果你有的话）。"
+                return await finalize(True, msg, double_effect_used=double_factor > 1)
         if name == "催眠":
             # 强制目标使用一张道具卡（随机，如果使用的道具卡需要@目标则随机指定群内的目标）
             if not target_uid:
@@ -9289,28 +9762,41 @@ class WifePlugin(Star):
                     
                     if random.random() < rival_prob:
                         stolen_img = random.choice(target_wives)
-                        target_wives.remove(stolen_img)
                         
-                        # 在目标配置中移除该老婆
-                        if rival_target_str in cfg:
-                            if not target_wives:
-                                del cfg[rival_target_str]
-                            else:
-                                cfg[rival_target_str]["wives"] = target_wives
-                                if not get_user_flag(today, rival_target_str, "harem"):
-                                    cfg[rival_target_str]["harem"] = False
+                        # 检查移花接木（替身效果）
+                        scapegoat_triggered = False
+                        if get_user_flag(today, rival_target_str, "scapegoat"):
+                            eff = get_user_effects(today, rival_target_str)
+                            meta = eff.setdefault("meta", {})
+                            blocks = int(meta.get("scapegoat_blocks", 1) or 1) - 1
+                            meta["scapegoat_blocks"] = blocks
+                            if blocks <= 0:
+                                set_user_flag(today, rival_target_str, "scapegoat", False)
+                            save_effects()
+                            stolen_img = "哥布林杀手!哥布林.png"
+                            scapegoat_triggered = True
+                            
+                        if not scapegoat_triggered:
+                            target_wives.remove(stolen_img)
+                            # 在目标配置中移除该老婆
+                            if rival_target_str in cfg:
+                                if not target_wives:
+                                    del cfg[rival_target_str]
+                                else:
+                                    cfg[rival_target_str]["wives"] = target_wives
+                                    if not get_user_flag(today, rival_target_str, "harem"):
+                                        cfg[rival_target_str]["harem"] = False
+                            # 记录流失通知
+                            self._handle_wife_loss(today, rival_target_str, 1, gid, lost_wives_list=[stolen_img])
                          
                         # 将抽到的老婆设为被抢来的这个
                         img = stolen_img
                         rival_stolen = True
-                        rival_stolen_wife_name = self._get_wife_display_name(cfg, stolen_img)
-                        
-                        # 获取情敌昵称
-                        rival_target_info = cfg.get(rival_target_str, {})
-                        rival_target_nick = rival_target_info.get("nick", f"用户{rival_target_str}") if isinstance(rival_target_info, dict) else f"用户{rival_target_str}"
-                        
-                        # 记录流失通知
-                        self._handle_wife_loss(today, rival_target_str, 1, gid, lost_wives_list=[stolen_img])
+                        if scapegoat_triggered:
+                            rival_stolen_wife_name = "哥布林"
+                            rival_scapegoat = True
+                        else:
+                            rival_stolen_wife_name = self._get_wife_display_name(cfg, stolen_img)
                         
         # 统一使用add_wife函数添加老婆
         add_wife(cfg, uid, img, today, nick, is_harem)
@@ -9330,7 +9816,10 @@ class WifePlugin(Star):
             text = ""
             
         if rival_stolen:
-            text = f"【情敌抢夺】情敌见面分外眼红！你直接从情敌 {rival_target_nick} 手中抢夺了他的老婆「{rival_stolen_wife_name}」！"
+            if 'rival_scapegoat' in locals() and rival_scapegoat:
+                text = f"【情敌抢夺】你本想从情敌 {rival_target_nick} 手中抢夺老婆，但对方使用了「移花接木」替身！你费尽心机最终只抢到了——"
+            else:
+                text = f"【情敌抢夺】情敌见面分外眼红！你直接从情敌 {rival_target_nick} 手中抢夺了他的老婆「{rival_stolen_wife_name}」！"
             if is_harem:
                 text += f" 当前共有 {wife_count} 个老婆。"
         # 解析出处和角色名，分隔符为!
@@ -9484,21 +9973,36 @@ class WifePlugin(Star):
             if get_user_flag(today, uid, "protect_from_ntr"):
                 yield event.plain_result("坚守纯爱的你拒绝了牛来的老婆，不要违背自己的内心哦")
                 return
-            lost_wives = get_user_meta(today, tid, "lost_wives", [])
-            if not isinstance(lost_wives, list):
-                lost_wives = []
-            if wife not in lost_wives:
-                lost_wives.append(wife)
-            set_user_meta(today, tid, "lost_wives", lost_wives)
-            # 从目标处移除老婆
-            if is_harem_user(cfg, tid):
-                cfg[tid]["wives"].remove(wife)
-                if len(cfg[tid]["wives"]) == 0:
+            # 移花接木触发判定
+            scapegoat_triggered = False
+            if get_user_flag(today, tid, "scapegoat"):
+                eff = get_user_effects(today, tid)
+                meta = eff.setdefault("meta", {})
+                blocks = int(meta.get("scapegoat_blocks", 1) or 1) - 1
+                meta["scapegoat_blocks"] = blocks
+                if blocks <= 0:
+                    set_user_flag(today, tid, "scapegoat", False)
+                save_effects()
+                display_name = self._get_wife_display_name(cfg, wife)
+                wife = "哥布林杀手!哥布林.png"
+                scapegoat_triggered = True
+                
+            if not scapegoat_triggered:
+                lost_wives = get_user_meta(today, tid, "lost_wives", [])
+                if not isinstance(lost_wives, list):
+                    lost_wives = []
+                if wife not in lost_wives:
+                    lost_wives.append(wife)
+                set_user_meta(today, tid, "lost_wives", lost_wives)
+                # 从目标处移除老婆
+                if is_harem_user(cfg, tid):
+                    cfg[tid]["wives"].remove(wife)
+                    if len(cfg[tid]["wives"]) == 0:
+                        del cfg[tid]
+                else:
                     del cfg[tid]
-            else:
-                del cfg[tid]
-            # 注意：这里已经在上面的代码中记录了lost_wives，所以传递lost_wives_list只是为了保持一致性
-            self._handle_wife_loss(today, tid, 1, gid, lost_wives_list=[wife])
+                # 注意：这里已经在上面的代码中记录了lost_wives，所以传递lost_wives_list只是为了保持一致性
+                self._handle_wife_loss(today, tid, 1, gid, lost_wives_list=[wife])
             # 检查攻击者是否有病娇效果（在有老婆的情况下成功牛别人时触发事件）
             attacker_has_wife = get_wife_count(cfg, uid, today) > 0
             landmine_girl = get_user_flag(today, uid, "landmine_girl")
@@ -9589,7 +10093,11 @@ class WifePlugin(Star):
             self._record_user_interaction(today, gid, uid, tid)
             counter_msg = await self._trigger_sensitive_skin(event, today, gid, uid, tid)
             riddler_info = "\n".join(riddler_messages) if riddler_messages else ""
-            result_msg = f"{riddler_info}\n{equal_rights_msg}牛老婆成功！老婆已归你所有，恭喜恭喜~" if riddler_info else f"{equal_rights_msg}牛老婆成功！老婆已归你所有，恭喜恭喜~"
+            if 'scapegoat_triggered' in locals() and scapegoat_triggered:
+                target_nick = cfg.get(tid, {}).get("nick", f"用户{tid}") if isinstance(cfg.get(tid), dict) else f"用户{tid}"
+                result_msg = f"{riddler_info}\n{equal_rights_msg}「移花接木」触发！{target_nick} 使用木偶替身避开了抢夺，你牛走的只是一只【哥布林】！"
+            else:
+                result_msg = f"{riddler_info}\n{equal_rights_msg}牛老婆成功！老婆已归你所有，恭喜恭喜~" if riddler_info else f"{equal_rights_msg}牛老婆成功！老婆已归你所有，恭喜恭喜~"
             if counter_msg:
                 result_msg += f"\n{counter_msg}"
             yield event.plain_result(result_msg)
@@ -10518,10 +11026,14 @@ class WifePlugin(Star):
                         if not get_user_flag(today, uid, "harem"):
                             rec["harem"] = False
             save_group_config(cfg)
+            # 检查被殴打的这位是不是间谍老婆，如果是则触发返回与偷卡
+            spy_msg = self._check_and_trigger_spy_eviction(today, uid, gid, [target_wife_img])
             # 处理失去老婆的逻辑
             fortune_msg = self._handle_wife_loss(today, uid, 1, gid, lost_wives_list=[target_wife_img])
             cancel_msg = await self.cancel_swap_on_wife_change(gid, [uid])
             msg = f"你下手太狠了，{wife_name}伤心地离开了你......"
+            if spy_msg:
+                msg = f"{msg}\n{spy_msg}"
             if fortune_msg:
                 msg += f"\n{fortune_msg}"
             yield event.plain_result(msg)
